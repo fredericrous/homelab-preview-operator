@@ -253,10 +253,10 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 	})
 
 	vscSpec := map[string]interface{}{
-		"driver":                    driver,
-		"deletionPolicy":            "Retain",
-		"source":                    map[string]interface{}{"snapshotHandle": snapshotHandle},
-		"volumeSnapshotClassName":   snapshotClass,
+		"driver":                  driver,
+		"deletionPolicy":          "Retain",
+		"source":                  map[string]interface{}{"snapshotHandle": snapshotHandle},
+		"volumeSnapshotClassName": snapshotClass,
 		"volumeSnapshotRef": map[string]interface{}{
 			"name":      vsName,
 			"namespace": namespace,
@@ -310,8 +310,8 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 	}
 
 	cnpgSpec := map[string]interface{}{
-		"instances":  int64(1),
-		"imageName":  "ghcr.io/cloudnative-pg/postgresql:17",
+		"instances": int64(1),
+		"imageName": "ghcr.io/cloudnative-pg/postgresql:17",
 		"bootstrap": map[string]interface{}{
 			"recovery": map[string]interface{}{
 				"volumeSnapshots": map[string]interface{}{
@@ -426,7 +426,7 @@ func (h *PreviewHandler) setupS3Proxy(ctx context.Context, namespace, bucket, pr
 			Namespace: namespace,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			StorageClassName: strPtr("rook-ceph-block"),
 			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{

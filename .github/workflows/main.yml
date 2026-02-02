@@ -1,0 +1,130 @@
+name: Main Branch
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  GO_VERSION: '1.23'
+  ENVTEST_K8S_VERSION: '1.29.0'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Cache envtest binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/testbin
+            ~/.cache/kubebuilder-envtest
+            ${{ github.workspace }}/bin
+          key: envtest-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ env.ENVTEST_K8S_VERSION }}
+          restore-keys: |
+            envtest-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            envtest-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          make controller-gen
+          make envtest
+
+      - name: Setup envtest environment
+        run: |
+          echo "KUBEBUILDER_ASSETS=$(${{ github.workspace }}/bin/setup-envtest use ${{ env.ENVTEST_K8S_VERSION }} --bin-dir ${{ github.workspace }}/bin -p path)" >> $GITHUB_ENV
+
+      - name: Run tests
+        env:
+          KUBEBUILDER_CONTROLPLANE_START_TIMEOUT: 60s
+          KUBEBUILDER_CONTROLPLANE_STOP_TIMEOUT: 60s
+        run: |
+          make test-unit
+
+  build-and-push:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      security-events: write
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'

@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Check required secrets
+        run: |
+          if [ -z "${{ secrets.WORKFLOW_TOKEN }}" ]; then
+            echo "::error::WORKFLOW_TOKEN secret is not set. This secret is required to trigger post-release workflows."
+            echo "::error::Please add a Personal Access Token with 'workflow' scope as WORKFLOW_TOKEN in repository secrets."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        run: |
+          make controller-gen
+          make envtest
+
+      - name: Run tests
+        env:
+          KUBEBUILDER_ASSETS: "${{ github.workspace }}/bin/k8s/1.29.0-linux-amd64"
+        run: |
+          make test-unit
+          make test-integration || true
+          make test || true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          VERSION_IMG=${VERSION#v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION_IMG=$VERSION_IMG" >> $GITHUB_OUTPUT
+
+          PREV_TAG=$(git describe --tags --abbrev=0 $VERSION^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s" $PREV_TAG..$VERSION)
+          else
+            COMMITS=$(git log --pretty=format:"- %s")
+          fi
+
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+
+          cat > release-notes.md << EOF
+          ## ${REPO_NAME} $VERSION
+
+          ### Docker Image
+          \`\`\`bash
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION_IMG
+          \`\`\`
+
+          ### Installation
+          \`\`\`bash
+          kubectl apply -k https://github.com/${{ github.repository }}/deploy?ref=$VERSION
+          \`\`\`
+
+          ### What's Changed
+          $COMMITS
+
+          ### Full Changelog
+          ${PREV_TAG:+https://github.com/${{ github.repository }}/compare/$PREV_TAG...$VERSION}
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+          generate_release_notes: true
+
+      - name: Trigger Post-Release Workflow
+        if: success()
+        env:
+          WORKFLOW_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
+        run: |
+          echo "Triggering post-release workflow..."
+          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $WORKFLOW_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/post-release.yaml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"tag\":\"${{ steps.release_notes.outputs.VERSION_IMG }}\"}}")
+
+          if [ "$HTTP_STATUS" != "204" ]; then
+            echo "::error::Failed to trigger post-release workflow (HTTP $HTTP_STATUS)"
+            cat response.json
+            exit 1
+          fi
+          echo "Successfully triggered post-release workflow"
+
+  security-scan:
+    name: Security Scan
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Wait for image to be available
+        run: |
+          echo "Waiting for image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} to be available..."
+          for i in {1..30}; do
+            if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} > /dev/null 2>&1; then
+              echo "Image is available!"
+              break
+            fi
+            echo "Attempt $i/30: Image not yet available, waiting 10 seconds..."
+            sleep 10
+          done
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
