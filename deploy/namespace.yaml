@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: preview-system
+  labels:
+    app.kubernetes.io/name: preview-operator
+    app.kubernetes.io/component: manager
