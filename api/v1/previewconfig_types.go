@@ -1,12 +1,25 @@
 // Package v1 contains API types for preview configuration
 package v1
 
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced,shortName=pc
+// +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.deploymentType`
+// +kubebuilder:printcolumn:name="Redis",type=boolean,JSONPath=`.spec.redis.enabled`
+// +kubebuilder:printcolumn:name="Storage",type=boolean,JSONPath=`.spec.storage.enabled`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
 // PreviewConfig defines the preview requirements for an app
-// This is NOT a CRD - it's the schema for preview.yaml files in app directories
 type PreviewConfig struct {
-	APIVersion string            `json:"apiVersion" yaml:"apiVersion"`
-	Kind       string            `json:"kind" yaml:"kind"`
-	Spec       PreviewConfigSpec `json:"spec" yaml:"spec"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   PreviewConfigSpec   `json:"spec,omitempty"`
+	Status PreviewConfigStatus `json:"status,omitempty"`
 }
 
 // PreviewConfigSpec defines the desired preview configuration
@@ -14,28 +27,45 @@ type PreviewConfigSpec struct {
 	// DeploymentType specifies how the app is deployed
 	// +kubebuilder:validation:Enum=deployment;helm
 	// +kubebuilder:default=deployment
-	DeploymentType DeploymentType `json:"deploymentType,omitempty" yaml:"deploymentType,omitempty"`
+	DeploymentType DeploymentType `json:"deploymentType,omitempty"`
 
 	// Redis configuration for preview
-	Redis *RedisConfig `json:"redis,omitempty" yaml:"redis,omitempty"`
+	// +optional
+	Redis *RedisConfig `json:"redis,omitempty"`
 
 	// Storage configuration for preview (S3/object storage)
-	Storage *StorageConfig `json:"storage,omitempty" yaml:"storage,omitempty"`
+	// +optional
+	Storage *StorageConfig `json:"storage,omitempty"`
 
 	// EnvMapping defines how to inject preview values into Deployments
 	// Used when DeploymentType is "deployment"
-	EnvMapping *EnvMapping `json:"envMapping,omitempty" yaml:"envMapping,omitempty"`
+	// +optional
+	EnvMapping *EnvMapping `json:"envMapping,omitempty"`
 
 	// HelmValues defines paths to values for HelmRelease patching
 	// Used when DeploymentType is "helm"
-	HelmValues *HelmValuesMapping `json:"helmValues,omitempty" yaml:"helmValues,omitempty"`
+	// +optional
+	HelmValues *HelmValuesMapping `json:"helmValues,omitempty"`
 
 	// SharedServices lists services that should use production instances
 	// e.g., ["litellm"] means preview uses production litellm
-	SharedServices []string `json:"sharedServices,omitempty" yaml:"sharedServices,omitempty"`
+	// +optional
+	SharedServices []string `json:"sharedServices,omitempty"`
+}
+
+// PreviewConfigStatus defines the observed state of PreviewConfig
+type PreviewConfigStatus struct {
+	// Conditions represent the latest available observations
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// LastProcessedTime is when the config was last processed
+	// +optional
+	LastProcessedTime *metav1.Time `json:"lastProcessedTime,omitempty"`
 }
 
 // DeploymentType specifies how the app is deployed
+// +kubebuilder:validation:Enum=deployment;helm
 type DeploymentType string
 
 const (
@@ -46,69 +76,111 @@ const (
 // RedisConfig defines Redis requirements
 type RedisConfig struct {
 	// Enabled specifies whether the app needs Redis
-	Enabled bool `json:"enabled" yaml:"enabled"`
+	Enabled bool `json:"enabled"`
 }
 
 // StorageConfig defines object storage requirements
 type StorageConfig struct {
 	// Enabled specifies whether the app needs S3-compatible storage
-	Enabled bool `json:"enabled" yaml:"enabled"`
+	Enabled bool `json:"enabled"`
 
 	// Bucket is the bucket name to use/create
-	Bucket string `json:"bucket,omitempty" yaml:"bucket,omitempty"`
+	// +optional
+	Bucket string `json:"bucket,omitempty"`
 }
 
 // EnvMapping defines environment variable names for Deployment patching
 type EnvMapping struct {
 	// Database configuration
-	DatabaseHost     string `json:"databaseHost,omitempty" yaml:"databaseHost,omitempty"`
-	DatabaseName     string `json:"databaseName,omitempty" yaml:"databaseName,omitempty"`
-	DatabaseUser     string `json:"databaseUser,omitempty" yaml:"databaseUser,omitempty"`
-	DatabasePassword string `json:"databasePassword,omitempty" yaml:"databasePassword,omitempty"`
+	// +optional
+	DatabaseHost string `json:"databaseHost,omitempty"`
+	// +optional
+	DatabaseName string `json:"databaseName,omitempty"`
+	// +optional
+	DatabaseUser string `json:"databaseUser,omitempty"`
+	// +optional
+	DatabasePassword string `json:"databasePassword,omitempty"`
 
 	// Redis configuration
-	RedisHost string `json:"redisHost,omitempty" yaml:"redisHost,omitempty"`
-	RedisPort string `json:"redisPort,omitempty" yaml:"redisPort,omitempty"`
+	// +optional
+	RedisHost string `json:"redisHost,omitempty"`
+	// +optional
+	RedisPort string `json:"redisPort,omitempty"`
 
 	// S3/Storage configuration
-	S3Endpoint  string `json:"s3Endpoint,omitempty" yaml:"s3Endpoint,omitempty"`
-	S3AccessKey string `json:"s3AccessKey,omitempty" yaml:"s3AccessKey,omitempty"`
-	S3SecretKey string `json:"s3SecretKey,omitempty" yaml:"s3SecretKey,omitempty"`
-	S3Bucket    string `json:"s3Bucket,omitempty" yaml:"s3Bucket,omitempty"`
-	S3Region    string `json:"s3Region,omitempty" yaml:"s3Region,omitempty"`
+	// +optional
+	S3Endpoint string `json:"s3Endpoint,omitempty"`
+	// +optional
+	S3AccessKey string `json:"s3AccessKey,omitempty"`
+	// +optional
+	S3SecretKey string `json:"s3SecretKey,omitempty"`
+	// +optional
+	S3Bucket string `json:"s3Bucket,omitempty"`
+	// +optional
+	S3Region string `json:"s3Region,omitempty"`
 
 	// OIDC configuration
-	OIDCClientID     string `json:"oidcClientId,omitempty" yaml:"oidcClientId,omitempty"`
-	OIDCClientSecret string `json:"oidcClientSecret,omitempty" yaml:"oidcClientSecret,omitempty"`
-	OIDCRedirectURI  string `json:"oidcRedirectUri,omitempty" yaml:"oidcRedirectUri,omitempty"`
+	// +optional
+	OIDCClientID string `json:"oidcClientId,omitempty"`
+	// +optional
+	OIDCClientSecret string `json:"oidcClientSecret,omitempty"`
+	// +optional
+	OIDCRedirectURI string `json:"oidcRedirectUri,omitempty"`
 
 	// App URL (for OIDC redirect, etc.)
-	AppURL string `json:"appUrl,omitempty" yaml:"appUrl,omitempty"`
+	// +optional
+	AppURL string `json:"appUrl,omitempty"`
 }
 
 // HelmValuesMapping defines value paths for HelmRelease patching
 // Paths use dot notation (e.g., "gitea.config.database.HOST")
 type HelmValuesMapping struct {
 	// Database configuration
-	DatabaseHost     string `json:"databaseHost,omitempty" yaml:"databaseHost,omitempty"`
-	DatabaseName     string `json:"databaseName,omitempty" yaml:"databaseName,omitempty"`
-	DatabaseUser     string `json:"databaseUser,omitempty" yaml:"databaseUser,omitempty"`
-	DatabasePassword string `json:"databasePassword,omitempty" yaml:"databasePassword,omitempty"`
+	// +optional
+	DatabaseHost string `json:"databaseHost,omitempty"`
+	// +optional
+	DatabaseName string `json:"databaseName,omitempty"`
+	// +optional
+	DatabaseUser string `json:"databaseUser,omitempty"`
+	// +optional
+	DatabasePassword string `json:"databasePassword,omitempty"`
 
 	// Redis configuration
-	RedisHost string `json:"redisHost,omitempty" yaml:"redisHost,omitempty"`
-	RedisPort string `json:"redisPort,omitempty" yaml:"redisPort,omitempty"`
+	// +optional
+	RedisHost string `json:"redisHost,omitempty"`
+	// +optional
+	RedisPort string `json:"redisPort,omitempty"`
 
 	// S3/Storage configuration
-	S3Endpoint  string `json:"s3Endpoint,omitempty" yaml:"s3Endpoint,omitempty"`
-	S3AccessKey string `json:"s3AccessKey,omitempty" yaml:"s3AccessKey,omitempty"`
-	S3SecretKey string `json:"s3SecretKey,omitempty" yaml:"s3SecretKey,omitempty"`
-	S3Bucket    string `json:"s3Bucket,omitempty" yaml:"s3Bucket,omitempty"`
+	// +optional
+	S3Endpoint string `json:"s3Endpoint,omitempty"`
+	// +optional
+	S3AccessKey string `json:"s3AccessKey,omitempty"`
+	// +optional
+	S3SecretKey string `json:"s3SecretKey,omitempty"`
+	// +optional
+	S3Bucket string `json:"s3Bucket,omitempty"`
 
 	// OIDC configuration
-	OIDCClientID     string `json:"oidcClientId,omitempty" yaml:"oidcClientId,omitempty"`
-	OIDCClientSecret string `json:"oidcClientSecret,omitempty" yaml:"oidcClientSecret,omitempty"`
+	// +optional
+	OIDCClientID string `json:"oidcClientId,omitempty"`
+	// +optional
+	OIDCClientSecret string `json:"oidcClientSecret,omitempty"`
 
 	// App URL
-	AppURL string `json:"appUrl,omitempty" yaml:"appUrl,omitempty"`
+	// +optional
+	AppURL string `json:"appUrl,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// PreviewConfigList contains a list of PreviewConfig
+type PreviewConfigList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []PreviewConfig `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&PreviewConfig{}, &PreviewConfigList{})
 }

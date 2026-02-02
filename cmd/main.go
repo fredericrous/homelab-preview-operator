@@ -14,6 +14,7 @@ import (
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 
+	previewv1 "github.com/fredericrous/homelab-preview-operator/api/v1"
 	"github.com/fredericrous/homelab-preview-operator/internal/controller"
 )
 
@@ -26,6 +27,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(kustomizev1.AddToScheme(scheme))
 	utilruntime.Must(sourcev1.AddToScheme(scheme))
+	utilruntime.Must(previewv1.AddToScheme(scheme))
 }
 
 func main() {

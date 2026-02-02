@@ -16,7 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 
@@ -86,36 +85,30 @@ func (h *PreviewHandler) Process(ctx context.Context, ks *kustomizev1.Kustomizat
 	return nil
 }
 
-// fetchPreviewConfig reads preview.yaml from a ConfigMap in the preview namespace
-// The ConfigMap is created by ResourceSet with the content from the app's preview.yaml
+// fetchPreviewConfig fetches the PreviewConfig CRD for the app
+// It first checks the preview namespace, then falls back to the production namespace
 func (h *PreviewHandler) fetchPreviewConfig(ctx context.Context, namespace, appName string) (*v1.PreviewConfig, error) {
-	// First try preview namespace
-	configMapName := types.NamespacedName{
+	config := &v1.PreviewConfig{}
+
+	// First try preview namespace (if config was copied there)
+	previewName := types.NamespacedName{
 		Namespace: namespace,
-		Name:      fmt.Sprintf("%s-preview-config", appName),
+		Name:      appName,
+	}
+	if err := h.client.Get(ctx, previewName, config); err == nil {
+		return config, nil
 	}
 
-	var cm corev1.ConfigMap
-	if err := h.client.Get(ctx, configMapName, &cm); err != nil {
-		// Try production namespace as fallback
-		configMapName.Namespace = appName
-		configMapName.Name = "preview-config"
-		if err := h.client.Get(ctx, configMapName, &cm); err != nil {
-			return nil, err
-		}
+	// Fall back to production namespace (app's namespace)
+	prodName := types.NamespacedName{
+		Namespace: appName,
+		Name:      appName,
+	}
+	if err := h.client.Get(ctx, prodName, config); err != nil {
+		return nil, err
 	}
 
-	configData, ok := cm.Data["preview.yaml"]
-	if !ok {
-		return nil, errors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, configMapName.Name)
-	}
-
-	var config v1.PreviewConfig
-	if err := yaml.Unmarshal([]byte(configData), &config); err != nil {
-		return nil, fmt.Errorf("failed to parse preview.yaml: %w", err)
-	}
-
-	return &config, nil
+	return config, nil
 }
 
 // setupOIDC discovers and clones the OIDC client from production
