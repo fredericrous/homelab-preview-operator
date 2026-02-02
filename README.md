@@ -113,3 +113,4 @@ make deploy
 | `--leader-elect` | `false` | Enable leader election |
 | `--metrics-bind-address` | `:8080` | Metrics endpoint |
 | `--health-probe-bind-address` | `:8081` | Health probe endpoint |
+
