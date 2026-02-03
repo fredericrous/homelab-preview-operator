@@ -62,6 +62,37 @@ jobs:
           token: ${{ secrets.CHARTS_REPO_TOKEN }}
           path: charts
 
+      - name: Sync CRDs and RBAC from operator
+        run: |
+          CHART_NAME="${{ github.event.repository.name }}"
+          CHART_DIR="charts/charts/${CHART_NAME}"
+
+          # Sync CRDs
+          if [ -d "operator/config/crd/bases" ]; then
+            echo "Syncing CRDs from operator to chart..."
+            mkdir -p "${CHART_DIR}/crds"
+            cp -v operator/config/crd/bases/*.yaml "${CHART_DIR}/crds/"
+          fi
+
+          # Sync ClusterRole from operator RBAC
+          if [ -f "operator/config/rbac/role.yaml" ]; then
+            echo "Generating ClusterRole template from operator RBAC..."
+            cat > "${CHART_DIR}/templates/clusterrole.yaml" << 'TMPL'
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: {{ include "homelab-preview-operator.fullname" . }}
+            labels:
+              {{- include "homelab-preview-operator.labels" . | nindent 4 }}
+          TMPL
+            echo "rules:" >> "${CHART_DIR}/templates/clusterrole.yaml"
+            yq '.rules' operator/config/rbac/role.yaml | sed 's/^/  /' >> "${CHART_DIR}/templates/clusterrole.yaml"
+          fi
+
+          cd charts
+          git diff --stat || true
+          git status
+
       - name: Update Chart.yaml
         id: update-chart
         run: |
@@ -135,6 +166,8 @@ jobs:
 
             ### Files Updated
             - `charts/${{ steps.update-chart.outputs.chart_name }}/Chart.yaml` - Updated appVersion and chart version
+            - `charts/${{ steps.update-chart.outputs.chart_name }}/crds/*.yaml` - Synced CRDs from operator
+            - `charts/${{ steps.update-chart.outputs.chart_name }}/templates/clusterrole.yaml` - Synced RBAC rules from operator
             - `README.md` - Updated chart version and app version in charts table
 
             ### What's Changed
