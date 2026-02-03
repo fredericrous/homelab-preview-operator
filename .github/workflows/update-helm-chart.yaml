@@ -1,10 +1,6 @@
 name: Update Helm Chart
 
 on:
-  release:
-    types: [published]
-  repository_dispatch:
-    types: [helm-chart-update]
   workflow_dispatch:
     inputs:
       version:
@@ -38,15 +34,7 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          if [ "${{ github.event_name }}" == "release" ]; then
-            VERSION="${{ github.event.release.tag_name }}"
-            VERSION="${VERSION#v}"
-          elif [ "${{ github.event_name }}" == "repository_dispatch" ]; then
-            VERSION="${{ github.event.client_payload.version }}"
-            VERSION="${VERSION#v}"
-          else
-            VERSION="${{ github.event.inputs.version }}"
-          fi
+          VERSION="${{ github.event.inputs.version }}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
@@ -176,15 +164,7 @@ jobs:
 
             ### What's Changed
 
-            ${{ github.event.release.body }}
-
-            ### Next Steps
-
-            After merging this PR, create a new release tag:
-            ```bash
-            git tag ${{ steps.update-chart.outputs.chart_name }}-v${{ steps.update-chart.outputs.chart_version }}
-            git push origin ${{ steps.update-chart.outputs.chart_name }}-v${{ steps.update-chart.outputs.chart_version }}
-            ```
+            See [release notes](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.version }}) for details.
 
             ---
             *This PR was automatically generated when [operator version ${{ steps.version.outputs.version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.version }}) was released.*
@@ -217,7 +197,7 @@ jobs:
             ```
 
       - name: Enable auto-merge
-        if: steps.create-pr.outputs.pull-request-number && github.event_name == 'release'
+        if: steps.create-pr.outputs.pull-request-number
         continue-on-error: true
         run: |
           sleep 5
