@@ -77,14 +77,14 @@ jobs:
           # Sync ClusterRole from operator RBAC
           if [ -f "operator/config/rbac/role.yaml" ]; then
             echo "Generating ClusterRole template from operator RBAC..."
-            cat > "${CHART_DIR}/templates/clusterrole.yaml" << 'TMPL'
+            cat > "${CHART_DIR}/templates/clusterrole.yaml" << EOF
           apiVersion: rbac.authorization.k8s.io/v1
           kind: ClusterRole
           metadata:
-            name: {{ include "homelab-preview-operator.fullname" . }}
+            name: {{ include "${CHART_NAME}.fullname" . }}
             labels:
-              {{- include "homelab-preview-operator.labels" . | nindent 4 }}
-          TMPL
+              {{- include "${CHART_NAME}.labels" . | nindent 4 }}
+          EOF
             echo "rules:" >> "${CHART_DIR}/templates/clusterrole.yaml"
             yq '.rules' operator/config/rbac/role.yaml | sed 's/^/  /' >> "${CHART_DIR}/templates/clusterrole.yaml"
           fi
@@ -118,8 +118,11 @@ jobs:
           yq -i ".version = \"$NEW_VERSION\"" "$CHART_PATH"
           yq -i ".appVersion = \"$NEW_VERSION\"" "$CHART_PATH"
 
+          CHART_DESCRIPTION=$(yq '.description' "$CHART_PATH")
+
           echo "chart_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "chart_name=$CHART_NAME" >> $GITHUB_OUTPUT
+          echo "chart_description=$CHART_DESCRIPTION" >> $GITHUB_OUTPUT
 
           echo "Updated Chart.yaml:"
           cat "$CHART_PATH"
@@ -131,13 +134,14 @@ jobs:
           CHART_NAME="${{ steps.update-chart.outputs.chart_name }}"
           CHART_VERSION="${{ steps.update-chart.outputs.chart_version }}"
           APP_VERSION="${{ steps.version.outputs.version }}"
+          CHART_DESCRIPTION="${{ steps.update-chart.outputs.chart_description }}"
 
           if [ -f "$README_FILE" ]; then
             if grep -q "\[${CHART_NAME}\]" "$README_FILE"; then
               echo "Updating existing chart entry in README.md"
               while IFS= read -r line; do
                 if [[ "$line" == *"[${CHART_NAME}]"* ]]; then
-                  echo "| [${CHART_NAME}](charts/${CHART_NAME}/) | ${CHART_VERSION} | ${APP_VERSION} | A Kubernetes operator that automatically configures preview environments |"
+                  echo "| [${CHART_NAME}](charts/${CHART_NAME}/) | ${CHART_VERSION} | ${APP_VERSION} | ${CHART_DESCRIPTION} |"
                 else
                   echo "$line"
                 fi

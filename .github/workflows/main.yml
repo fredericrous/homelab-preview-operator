@@ -5,7 +5,6 @@ on:
     branches: [ main ]
 
 env:
-  GO_VERSION: '1.23'
   ENVTEST_K8S_VERSION: '1.29.0'
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -21,7 +20,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: false
 
       - name: Cache Go modules
