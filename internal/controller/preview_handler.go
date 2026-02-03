@@ -77,7 +77,14 @@ func (h *PreviewHandler) Process(ctx context.Context, ks *kustomizev1.Kustomizat
 		}
 	}
 
-	// 6. Patch deployment/helmrelease with correct env vars
+	// 6. Setup config volume clone with URL rewriting
+	if config.Spec.ConfigVolume != nil {
+		if err := h.setupConfigVolume(ctx, namespace, appName, prNumber, config); err != nil {
+			return fmt.Errorf("failed to setup config volume: %w", err)
+		}
+	}
+
+	// 7. Patch deployment/helmrelease with correct env vars
 	if err := h.patchWorkload(ctx, namespace, appName, prNumber, config); err != nil {
 		return fmt.Errorf("failed to patch workload: %w", err)
 	}

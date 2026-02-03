@@ -54,6 +54,21 @@ spec:
           spec:
             description: PreviewConfigSpec defines the desired preview configuration
             properties:
+              configVolume:
+                description: ConfigVolume defines a config PVC to clone with automatic
+                  URL rewriting
+                properties:
+                  claimName:
+                    description: ClaimName is the PVC name in the production namespace
+                      to snapshot
+                    type: string
+                  snapshotClass:
+                    default: ceph-block-snapshot
+                    description: SnapshotClass is the VolumeSnapshotClass to use
+                    type: string
+                required:
+                - claimName
+                type: object
               deploymentType:
                 allOf:
                 - enum:

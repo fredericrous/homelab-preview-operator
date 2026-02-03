@@ -51,6 +51,20 @@ type PreviewConfigSpec struct {
 	// e.g., ["litellm"] means preview uses production litellm
 	// +optional
 	SharedServices []string `json:"sharedServices,omitempty"`
+
+	// ConfigVolume defines a config PVC to clone with automatic URL rewriting
+	// +optional
+	ConfigVolume *ConfigVolumeConfig `json:"configVolume,omitempty"`
+}
+
+// ConfigVolumeConfig defines a config PVC to clone for preview
+type ConfigVolumeConfig struct {
+	// ClaimName is the PVC name in the production namespace to snapshot
+	ClaimName string `json:"claimName"`
+	// SnapshotClass is the VolumeSnapshotClass to use
+	// +optional
+	// +kubebuilder:default=ceph-block-snapshot
+	SnapshotClass string `json:"snapshotClass,omitempty"`
 }
 
 // PreviewConfigStatus defines the observed state of PreviewConfig
