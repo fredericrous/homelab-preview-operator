@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -92,6 +94,140 @@ func (h *PreviewHandler) Process(ctx context.Context, ks *kustomizev1.Kustomizat
 	return nil
 }
 
+// PrepareKustomization generates patches for a suspended Kustomization and unsuspends it.
+// This is the new flow: ResourceSet creates a suspended Kustomization, operator fills patches.
+func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomizev1.Kustomization, appName string) error {
+	namespace := ks.Namespace
+	prNumber := strings.TrimPrefix(namespace, "preview-pr-")
+
+	// Fetch PreviewConfig from production namespace
+	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			h.log.Info("No PreviewConfig found, unsuspending with strip patches only", "app", appName)
+			// Still apply strip patches even without app config
+			config = &v1.PreviewConfig{}
+		} else {
+			return fmt.Errorf("failed to fetch preview config: %w", err)
+		}
+	}
+
+	// Discover OIDC callback path from production
+	callbackPath := h.discoverOIDCCallbackPath(ctx, appName)
+
+	// Generate all patches
+	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath)
+
+	// Apply patches to the Kustomization
+	ks.Spec.Patches = allPatches
+
+	// Set annotation to mark patches as applied
+	annotations := ks.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[PatchesAppliedAnnotation] = "true"
+	ks.SetAnnotations(annotations)
+
+	// Unsuspend the Kustomization
+	ks.Spec.Suspend = false
+
+	// Update the Kustomization
+	if err := h.client.Update(ctx, ks); err != nil {
+		return fmt.Errorf("failed to update Kustomization with patches: %w", err)
+	}
+
+	h.log.Info("Prepared Kustomization with patches", "app", appName, "patchCount", len(allPatches))
+	return nil
+}
+
+// CreateInfrastructure sets up all preview infrastructure resources.
+// Called after the Kustomization has been patched and is reconciling.
+func (h *PreviewHandler) CreateInfrastructure(ctx context.Context, ks *kustomizev1.Kustomization, appName string) error {
+	namespace := ks.Namespace
+	prNumber := strings.TrimPrefix(namespace, "preview-pr-")
+
+	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			h.log.Info("No PreviewConfig found, skipping infrastructure setup", "app", appName)
+			return nil
+		}
+		return fmt.Errorf("failed to fetch preview config: %w", err)
+	}
+
+	// Setup OIDC with operator-managed secret
+	if err := h.setupOIDC(ctx, namespace, appName, prNumber); err != nil {
+		return fmt.Errorf("failed to setup OIDC: %w", err)
+	}
+
+	// Setup database from production snapshot
+	if err := h.setupDatabase(ctx, namespace, appName, prNumber); err != nil {
+		return fmt.Errorf("failed to setup database: %w", err)
+	}
+
+	// Setup Redis if needed
+	if config.Spec.Redis != nil && config.Spec.Redis.Enabled {
+		if err := h.setupRedis(ctx, namespace); err != nil {
+			return fmt.Errorf("failed to setup Redis: %w", err)
+		}
+	}
+
+	// Setup S3 proxy if needed
+	if config.Spec.Storage != nil && config.Spec.Storage.Enabled {
+		if err := h.setupS3Proxy(ctx, namespace, config.Spec.Storage.Bucket, prNumber); err != nil {
+			return fmt.Errorf("failed to setup S3 proxy: %w", err)
+		}
+	}
+
+	// Setup config volume clone with URL rewriting
+	if config.Spec.ConfigVolume != nil {
+		if err := h.setupConfigVolume(ctx, namespace, appName, prNumber, config); err != nil {
+			return fmt.Errorf("failed to setup config volume: %w", err)
+		}
+	}
+
+	// Note: patchWorkload is NOT called here - Kustomization patches handle env/helm overrides
+
+	return nil
+}
+
+// discoverOIDCCallbackPath reads the OIDCClient from production to extract the callback path
+func (h *PreviewHandler) discoverOIDCCallbackPath(ctx context.Context, appName string) string {
+	oidcClient := &unstructured.Unstructured{}
+	oidcClient.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "security.homelab.io",
+		Version: "v1alpha1",
+		Kind:    "OIDCClient",
+	})
+
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: appName, Name: appName}, oidcClient); err != nil {
+		return "/oauth/callback"
+	}
+
+	redirectURIs, _, _ := unstructured.NestedStringSlice(oidcClient.Object, "spec", "redirectUris")
+	if len(redirectURIs) > 0 {
+		uri := redirectURIs[0]
+		if idx := strings.Index(uri, "//"); idx != -1 {
+			remainder := uri[idx+2:]
+			if pathIdx := strings.Index(remainder, "/"); pathIdx != -1 {
+				return remainder[pathIdx:]
+			}
+		}
+	}
+	return "/oauth/callback"
+}
+
+// generateRandomString generates a cryptographically random hex string of the given byte length
+func generateRandomString(byteLen int) string {
+	b := make([]byte, byteLen)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to a predictable but unique-ish value
+		return "preview-fallback-secret"
+	}
+	return hex.EncodeToString(b)
+}
+
 // fetchPreviewConfig fetches the PreviewConfig CRD for the app
 // It first checks the preview namespace, then falls back to the production namespace
 func (h *PreviewHandler) fetchPreviewConfig(ctx context.Context, namespace, appName string) (*v1.PreviewConfig, error) {
@@ -177,11 +313,35 @@ func (h *PreviewHandler) setupOIDC(ctx context.Context, namespace, appName, prNu
 		newSpec[k] = v
 	}
 
+	// Generate random client secret
+	clientSecret := generateRandomString(32)
+
+	// Create K8s secret in preview namespace with the OIDC client secret
+	oidcSecretName := fmt.Sprintf("preview-oidc-client-secret-%s", prNumber)
+	oidcSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      oidcSecretName,
+			Namespace: namespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"client_secret": clientSecret,
+		},
+	}
+	if err := h.createOrUpdateTyped(ctx, oidcSecret); err != nil {
+		return fmt.Errorf("failed to create OIDC client secret: %w", err)
+	}
+
 	// Update client ID and redirect URI
 	newSpec["clientId"] = fmt.Sprintf("preview-%s-%s", appName, prNumber)
 	newSpec["clientName"] = fmt.Sprintf("%s Preview PR #%s", appName, prNumber)
 	newSpec["redirectUris"] = []interface{}{
 		fmt.Sprintf("https://pr-%s-%s.%s%s", prNumber, appName, h.previewDomain, callbackPath),
+	}
+	// Point secretRef to the operator-created secret
+	newSpec["secretRef"] = map[string]interface{}{
+		"name": oidcSecretName,
+		"key":  "client_secret",
 	}
 
 	if err := unstructured.SetNestedMap(previewOIDC.Object, newSpec, "spec"); err != nil {
@@ -193,7 +353,7 @@ func (h *PreviewHandler) setupOIDC(ctx context.Context, namespace, appName, prNu
 		return err
 	}
 
-	h.log.Info("Created preview OIDCClient", "name", previewOIDC.GetName())
+	h.log.Info("Created preview OIDCClient with managed secret", "name", previewOIDC.GetName(), "secret", oidcSecretName)
 	return nil
 }
 

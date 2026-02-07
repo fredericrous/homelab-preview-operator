@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +21,9 @@ const (
 
 	// AppNameLabel identifies the app being previewed
 	AppNameLabel = "app.kubernetes.io/name"
+
+	// PatchesAppliedAnnotation indicates the operator has applied patches
+	PatchesAppliedAnnotation = "preview.homelab.io/patches-applied"
 )
 
 // KustomizationReconciler watches Flux Kustomizations with preview labels
@@ -30,7 +34,7 @@ type KustomizationReconciler struct {
 	PreviewDomain string
 }
 
-// +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories,verbs=get;list;watch
 // +kubebuilder:rbac:groups=security.homelab.io,resources=oidcclients,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
@@ -38,6 +42,7 @@ type KustomizationReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=helm.toolkit.fluxcd.io,resources=helmreleases,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces;secrets;configmaps;services,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=preview.homelab.io,resources=previewconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;create
 
 // Reconcile handles Kustomization events
@@ -48,7 +53,6 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	var ks kustomizev1.Kustomization
 	if err := r.Get(ctx, req.NamespacedName, &ks); err != nil {
 		if errors.IsNotFound(err) {
-			// Kustomization deleted - cleanup handled by namespace deletion
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -59,12 +63,9 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	log.Info("Processing preview Kustomization")
-
 	// Get the app name from labels
 	appName := ks.Labels[AppNameLabel]
 	if appName == "" {
-		// Try to infer from namespace
 		appName = inferAppNameFromNamespace(ks.Namespace)
 	}
 
@@ -73,10 +74,33 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	// Create the preview handler
 	handler := NewPreviewHandler(r.Client, log, r.PreviewDomain)
 
-	// Process the preview environment
+	// State 1: Kustomization is suspended → prepare patches and unsuspend
+	if ks.Spec.Suspend {
+		log.Info("Kustomization is suspended, preparing patches", "app", appName)
+		if err := handler.PrepareKustomization(ctx, &ks, appName); err != nil {
+			log.Error(err, "Failed to prepare Kustomization patches")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+		}
+		log.Info("Patches applied and Kustomization unsuspended", "app", appName)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// State 2: Patches applied, Kustomization running → create infrastructure
+	annotations := ks.GetAnnotations()
+	if annotations != nil && annotations[PatchesAppliedAnnotation] == "true" {
+		log.Info("Creating preview infrastructure", "app", appName)
+		if err := handler.CreateInfrastructure(ctx, &ks, appName); err != nil {
+			log.Error(err, "Failed to create preview infrastructure")
+			return ctrl.Result{RequeueAfter: 60 * time.Second}, err
+		}
+		log.Info("Preview infrastructure ready", "app", appName)
+		return ctrl.Result{}, nil
+	}
+
+	// Backward compatibility: not suspended, no patches-applied annotation → old flow
+	log.Info("Processing preview Kustomization (legacy flow)", "app", appName)
 	if err := handler.Process(ctx, &ks, appName); err != nil {
 		log.Error(err, "Failed to process preview environment")
 		return ctrl.Result{}, err
@@ -88,7 +112,6 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 // SetupWithManager sets up the controller with the Manager
 func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Only watch Kustomizations with the preview label
 	previewLabelPredicate := predicate.NewPredicateFuncs(func(obj client.Object) bool {
 		return obj.GetLabels()[PreviewEnvironmentLabel] == "true"
 	})
@@ -96,15 +119,11 @@ func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kustomizev1.Kustomization{}).
 		WithEventFilter(previewLabelPredicate).
-		// Watch owned resources
 		Owns(&corev1.Secret{}).
 		Complete(r)
 }
 
 // inferAppNameFromNamespace tries to extract app name from preview namespace
-// e.g., "preview-pr-7" -> look at namespace labels
 func inferAppNameFromNamespace(namespace string) string {
-	// This would need to read the namespace and check labels
-	// For now, return empty - handler will try other methods
 	return ""
 }
