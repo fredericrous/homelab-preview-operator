@@ -537,6 +537,11 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 	cnpgSpec := map[string]interface{}{
 		"instances": int64(1),
 		"imageName": "ghcr.io/cloudnative-pg/postgresql:17",
+		"inheritedMetadata": map[string]interface{}{
+			"annotations": map[string]interface{}{
+				"ambient.istio.io/redirection": "disabled",
+			},
+		},
 		"bootstrap": map[string]interface{}{
 			"recovery": map[string]interface{}{
 				"volumeSnapshots": map[string]interface{}{
