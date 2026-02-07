@@ -231,6 +231,12 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 		if config.Spec.HelmValues != nil {
 			h := &PreviewHandler{previewDomain: previewDomain}
 			valuePatches := h.buildHelmValuePatches(namespace, appName, prNumber, config)
+
+			// Patch OIDC client secret reference to use operator-created secret
+			if config.Spec.HelmValues.OIDCClientSecret != "" {
+				valuePatches[config.Spec.HelmValues.OIDCClientSecret] = fmt.Sprintf("preview-oidc-client-secret-%s", prNumber)
+			}
+
 			helmPatches := generateHelmValuePatches(appName, valuePatches)
 			allPatches = append(allPatches, helmPatches...)
 		}
