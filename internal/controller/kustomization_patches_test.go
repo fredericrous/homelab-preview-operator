@@ -464,6 +464,33 @@ func TestBuildAllPatchesHelmNoDbPassword(t *testing.T) {
 	}
 }
 
+func TestGenerateHelmValuesRemovePatch(t *testing.T) {
+	patch := generateHelmValuesRemovePatch("gitea", []string{
+		"gitea.config.database.USER",
+		"gitea.config.database.PASSWD",
+	})
+	if patch == nil {
+		t.Fatal("expected non-nil patch")
+	}
+
+	if !strings.Contains(patch.Patch, "op: remove") {
+		t.Error("patch missing op: remove")
+	}
+	if !strings.Contains(patch.Patch, "/spec/values/gitea/config/database/USER") {
+		t.Error("patch missing USER path")
+	}
+	if !strings.Contains(patch.Patch, "/spec/values/gitea/config/database/PASSWD") {
+		t.Error("patch missing PASSWD path")
+	}
+}
+
+func TestGenerateHelmValuesRemovePatchEmpty(t *testing.T) {
+	patch := generateHelmValuesRemovePatch("app", nil)
+	if patch != nil {
+		t.Error("expected nil for empty paths")
+	}
+}
+
 func TestBuildAllPatchesNoConfig(t *testing.T) {
 	config := &v1.PreviewConfig{}
 

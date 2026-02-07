@@ -177,6 +177,33 @@ spec:
 	}
 }
 
+// generateHelmValuesRemovePatch creates a JSON6902 patch that removes specific keys
+// from spec.values in a HelmRelease. This is needed when valuesFrom provides those
+// values, since spec.values takes precedence over valuesFrom in Flux.
+func generateHelmValuesRemovePatch(appName string, dotPaths []string) *kustomize.Patch {
+	if len(dotPaths) == 0 {
+		return nil
+	}
+
+	var ops []string
+	for _, dotPath := range dotPaths {
+		// Convert dot-notation (gitea.config.database.PASSWD) to JSON pointer (/spec/values/gitea/config/database/PASSWD)
+		jsonPath := "/spec/values/" + strings.ReplaceAll(dotPath, ".", "/")
+		ops = append(ops, fmt.Sprintf("- op: remove\n  path: %s", jsonPath))
+	}
+
+	patch := strings.Join(ops, "\n")
+
+	return &kustomize.Patch{
+		Target: &kustomize.Selector{
+			Group: "helm.toolkit.fluxcd.io",
+			Kind:  "HelmRelease",
+			Name:  appName,
+		},
+		Patch: patch,
+	}
+}
+
 // generateHelmValuePatches creates a strategic merge patch for a HelmRelease.
 // Only supports simple dot-notation paths. For env var overrides, use
 // generatePostRendererPatch instead.
@@ -336,6 +363,16 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 			}
 		}
 		allPatches = append(allPatches, *generateValuesFromReplacePatch(appName, valuesFromEntries))
+
+		// Remove value keys that are provided by valuesFrom (spec.values takes
+		// precedence over valuesFrom in Flux, so we must remove conflicting keys)
+		var removePaths []string
+		for _, e := range valuesFromEntries {
+			removePaths = append(removePaths, e.TargetPath)
+		}
+		if p := generateHelmValuesRemovePatch(appName, removePaths); p != nil {
+			allPatches = append(allPatches, *p)
+		}
 
 		// Helm value patches (simple dot-paths for HelmRelease spec.values)
 		if config.Spec.HelmValues != nil {
