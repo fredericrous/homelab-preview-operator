@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	kustomize "github.com/fluxcd/pkg/apis/kustomize"
@@ -32,14 +33,19 @@ var stripTargets = []infrastructureStripTarget{
 	{Group: "gateway.envoyproxy.io", Kind: "ClientTrafficPolicy"},
 	{Group: "security.homelab.io", Kind: "OIDCClient"},
 	{Group: "batch", Kind: "Job"},
+	{Group: "generators.external-secrets.io", Kind: "Password"},
+	{Group: "postgresql.cnpg.io", Kind: "Database"},
 }
+
+// arrayIndexRegex matches segments like "extraEnv[0]"
+var arrayIndexRegex = regexp.MustCompile(`^(.+)\[(\d+)\]$`)
 
 // generateStripPatches produces $patch: delete patches for all infrastructure resources
 // that should be excluded from preview namespaces.
 func generateStripPatches() []kustomize.Patch {
 	patches := make([]kustomize.Patch, 0, len(stripTargets))
 	for _, target := range stripTargets {
-		apiVersion := target.Kind
+		var apiVersion string
 		if target.Group != "" {
 			apiVersion = target.Group + "/v1"
 		} else {
@@ -121,23 +127,40 @@ func buildEnvVarFromYAML(ep EnvPatch) string {
 	)
 }
 
-// generateHelmValuePatches creates a strategic merge patch for a HelmRelease
-// that overrides spec.values entries.
-func generateHelmValuePatches(appName string, valuePatches map[string]string) *kustomize.Patch {
+// generateHelmValuePatches creates patches for a HelmRelease.
+// Simple dot-notation paths use strategic merge. Paths with array indices (e.g.
+// "nextcloud.extraEnv[0].value") use JSON6902 replace operations.
+func generateHelmValuePatches(appName string, valuePatches map[string]string) []kustomize.Patch {
 	if len(valuePatches) == 0 {
 		return nil
 	}
 
-	// Build a nested YAML structure from dot-notation paths
-	root := make(map[string]interface{})
+	// Split into simple paths and array-indexed paths
+	simplePaths := make(map[string]string)
+	var json6902Ops []string
+
 	for path, value := range valuePatches {
-		setNestedMapValue(root, path, value)
+		if containsArrayIndex(path) {
+			jsonPath := dotPathToJSONPointer(path)
+			json6902Ops = append(json6902Ops, fmt.Sprintf(
+				`  - op: replace
+    path: /spec/values%s
+    value: %s`, jsonPath, quoteJSON6902Value(value)))
+		} else {
+			simplePaths[path] = value
+		}
 	}
 
-	// Serialize the values map to YAML
-	valuesYAML := renderYAMLMap(root, 4)
+	var patches []kustomize.Patch
 
-	patch := fmt.Sprintf(`apiVersion: helm.toolkit.fluxcd.io/v2
+	// Strategic merge patch for simple paths
+	if len(simplePaths) > 0 {
+		root := make(map[string]interface{})
+		for path, value := range simplePaths {
+			setNestedMapValue(root, path, value)
+		}
+		valuesYAML := renderYAMLMap(root, 4)
+		patch := fmt.Sprintf(`apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
   name: %s
@@ -145,39 +168,55 @@ spec:
   values:
 %s`, appName, valuesYAML)
 
-	return &kustomize.Patch{
-		Target: &kustomize.Selector{
-			Group: "helm.toolkit.fluxcd.io",
-			Kind:  "HelmRelease",
-			Name:  appName,
-		},
-		Patch: patch,
+		patches = append(patches, kustomize.Patch{
+			Target: &kustomize.Selector{
+				Group: "helm.toolkit.fluxcd.io",
+				Kind:  "HelmRelease",
+				Name:  appName,
+			},
+			Patch: patch,
+		})
 	}
+
+	// JSON6902 patch for array-indexed paths
+	if len(json6902Ops) > 0 {
+		patch := fmt.Sprintf("- op: test\n  path: /apiVersion\n  value: helm.toolkit.fluxcd.io/v2\n%s",
+			strings.Join(json6902Ops, "\n"))
+		patches = append(patches, kustomize.Patch{
+			Target: &kustomize.Selector{
+				Group: "helm.toolkit.fluxcd.io",
+				Kind:  "HelmRelease",
+				Name:  appName,
+			},
+			Patch: patch,
+		})
+	}
+
+	return patches
 }
 
-// generateOIDCPatches creates patches for OIDC configuration in the app.
-// For deployments, this is handled via env patches. For Helm, via value patches.
-// This generates the OIDCClient secretRef patch for pointing to the operator-created secret.
-func generateOIDCSecretRefPatch(appName, prNumber string) *kustomize.Patch {
-	secretName := fmt.Sprintf("preview-oidc-client-secret-%s", prNumber)
+// containsArrayIndex checks if a dot-notation path has array indices like [0]
+func containsArrayIndex(path string) bool {
+	return strings.Contains(path, "[")
+}
 
-	patch := fmt.Sprintf(`apiVersion: security.homelab.io/v1alpha1
-kind: OIDCClient
-metadata:
-  name: %s
-spec:
-  secretRef:
-    name: %s
-    key: client_secret`, appName, secretName)
-
-	return &kustomize.Patch{
-		Target: &kustomize.Selector{
-			Group: "security.homelab.io",
-			Kind:  "OIDCClient",
-			Name:  appName,
-		},
-		Patch: patch,
+// dotPathToJSONPointer converts "nextcloud.extraEnv[0].value" to "/nextcloud/extraEnv/0/value"
+func dotPathToJSONPointer(path string) string {
+	parts := strings.Split(path, ".")
+	var result []string
+	for _, part := range parts {
+		if m := arrayIndexRegex.FindStringSubmatch(part); m != nil {
+			result = append(result, "/"+m[1], "/"+m[2])
+		} else {
+			result = append(result, "/"+part)
+		}
 	}
+	return strings.Join(result, "")
+}
+
+// quoteJSON6902Value returns the value as a JSON-safe string for JSON6902 patches
+func quoteJSON6902Value(value string) string {
+	return fmt.Sprintf("%q", value)
 }
 
 // buildAllPatches combines all patch types for a preview Kustomization
@@ -193,9 +232,8 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 		if config.Spec.HelmValues != nil {
 			h := &PreviewHandler{previewDomain: previewDomain}
 			valuePatches := h.buildHelmValuePatches(namespace, appName, prNumber, config)
-			if p := generateHelmValuePatches(appName, valuePatches); p != nil {
-				allPatches = append(allPatches, *p)
-			}
+			helmPatches := generateHelmValuePatches(appName, valuePatches)
+			allPatches = append(allPatches, helmPatches...)
 		}
 	default:
 		if config.Spec.EnvMapping != nil {
@@ -252,7 +290,6 @@ func renderYAMLMap(m map[string]interface{}, indent int) string {
 			lines = append(lines, fmt.Sprintf("%s%s:", prefix, k))
 			lines = append(lines, renderYAMLMap(val, indent+2))
 		case string:
-			// Quote values that might be interpreted as non-strings
 			lines = append(lines, fmt.Sprintf("%s%s: %q", prefix, k, val))
 		default:
 			lines = append(lines, fmt.Sprintf("%s%s: %v", prefix, k, val))

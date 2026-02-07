@@ -30,6 +30,8 @@ func TestGenerateStripPatches(t *testing.T) {
 	foundNamespace := false
 	foundExternalSecret := false
 	foundOIDCClient := false
+	foundPassword := false
+	foundDatabase := false
 	for _, p := range patches {
 		if p.Target.Kind == "Namespace" && p.Target.Group == "" {
 			foundNamespace = true
@@ -39,6 +41,12 @@ func TestGenerateStripPatches(t *testing.T) {
 		}
 		if p.Target.Kind == "OIDCClient" && p.Target.Group == "security.homelab.io" {
 			foundOIDCClient = true
+		}
+		if p.Target.Kind == "Password" && p.Target.Group == "generators.external-secrets.io" {
+			foundPassword = true
+		}
+		if p.Target.Kind == "Database" && p.Target.Group == "postgresql.cnpg.io" {
+			foundDatabase = true
 		}
 	}
 
@@ -50,6 +58,12 @@ func TestGenerateStripPatches(t *testing.T) {
 	}
 	if !foundOIDCClient {
 		t.Error("missing OIDCClient strip patch")
+	}
+	if !foundPassword {
+		t.Error("missing Password strip patch")
+	}
+	if !foundDatabase {
+		t.Error("missing Database strip patch")
 	}
 }
 
@@ -103,35 +117,83 @@ func TestGenerateDeploymentEnvPatchesEmpty(t *testing.T) {
 }
 
 func TestGenerateHelmValuePatches(t *testing.T) {
-	patches := map[string]string{
+	valuePatches := map[string]string{
 		"gitea.config.database.HOST":    "postgres-preview-7-rw.preview-pr-7.svc.cluster.local",
 		"gitea.config.database.DB_TYPE": "postgres",
 	}
 
-	patch := generateHelmValuePatches("gitea", patches)
-	if patch == nil {
-		t.Fatal("expected non-nil patch")
+	patches := generateHelmValuePatches("gitea", valuePatches)
+	if len(patches) == 0 {
+		t.Fatal("expected non-empty patches")
 	}
 
-	if patch.Target.Kind != "HelmRelease" {
-		t.Errorf("expected HelmRelease target, got %s", patch.Target.Kind)
+	// Simple paths should produce a strategic merge patch
+	found := false
+	for _, p := range patches {
+		if p.Target.Kind == "HelmRelease" && strings.Contains(p.Patch, "kind: HelmRelease") {
+			found = true
+		}
 	}
-	if patch.Target.Group != "helm.toolkit.fluxcd.io" {
-		t.Errorf("expected helm.toolkit.fluxcd.io group, got %s", patch.Target.Group)
+	if !found {
+		t.Error("missing strategic merge HelmRelease patch")
+	}
+}
+
+func TestGenerateHelmValuePatchesArrayIndex(t *testing.T) {
+	valuePatches := map[string]string{
+		"nextcloud.extraEnv[0].value": "redis-preview.preview-pr-8.svc.cluster.local",
+		"externalDatabase.host":       "postgres-preview-8-rw.preview-pr-8.svc.cluster.local",
 	}
 
-	if !strings.Contains(patch.Patch, "kind: HelmRelease") {
-		t.Error("patch missing HelmRelease kind")
+	patches := generateHelmValuePatches("nextcloud", valuePatches)
+	if len(patches) < 2 {
+		t.Fatalf("expected at least 2 patches (strategic merge + json6902), got %d", len(patches))
 	}
-	if !strings.Contains(patch.Patch, "spec:") {
-		t.Error("patch missing spec")
+
+	// Should have a JSON6902 patch for array-indexed path
+	foundJSON6902 := false
+	for _, p := range patches {
+		if strings.Contains(p.Patch, "op: replace") && strings.Contains(p.Patch, "/spec/values/nextcloud/extraEnv/0/value") {
+			foundJSON6902 = true
+		}
+	}
+	if !foundJSON6902 {
+		t.Error("missing JSON6902 patch for array-indexed path")
+	}
+
+	// Should have a strategic merge patch for simple path
+	foundStrategic := false
+	for _, p := range patches {
+		if strings.Contains(p.Patch, "kind: HelmRelease") && strings.Contains(p.Patch, "externalDatabase") {
+			foundStrategic = true
+		}
+	}
+	if !foundStrategic {
+		t.Error("missing strategic merge patch for simple path")
 	}
 }
 
 func TestGenerateHelmValuePatchesEmpty(t *testing.T) {
-	patch := generateHelmValuePatches("app", nil)
-	if patch != nil {
-		t.Error("expected nil patch for empty value patches")
+	patches := generateHelmValuePatches("app", nil)
+	if len(patches) != 0 {
+		t.Error("expected empty patches for nil input")
+	}
+}
+
+func TestDotPathToJSONPointer(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"nextcloud.extraEnv[0].value", "/nextcloud/extraEnv/0/value"},
+		{"nextcloud.extraEnv[3].valueFrom.secretKeyRef.name", "/nextcloud/extraEnv/3/valueFrom/secretKeyRef/name"},
+		{"simple.path", "/simple/path"},
+	}
+	for _, tt := range tests {
+		got := dotPathToJSONPointer(tt.input)
+		if got != tt.expected {
+			t.Errorf("dotPathToJSONPointer(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
 	}
 }
 
