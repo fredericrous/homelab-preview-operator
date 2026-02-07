@@ -105,6 +105,11 @@ type StorageConfig struct {
 
 // EnvMapping defines environment variable names for Deployment patching
 type EnvMapping struct {
+	// ContainerNames lists the container names to patch with env overrides.
+	// If empty, defaults to the app name.
+	// +optional
+	ContainerNames []string `json:"containerNames,omitempty"`
+
 	// Database configuration
 	// +optional
 	DatabaseHost string `json:"databaseHost,omitempty"`

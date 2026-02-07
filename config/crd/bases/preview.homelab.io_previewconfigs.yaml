@@ -88,6 +88,13 @@ spec:
                   appUrl:
                     description: App URL (for OIDC redirect, etc.)
                     type: string
+                  containerNames:
+                    description: |-
+                      ContainerNames lists the container names to patch with env overrides.
+                      If empty, defaults to the app name.
+                    items:
+                      type: string
+                    type: array
                   databaseHost:
                     description: Database configuration
                     type: string

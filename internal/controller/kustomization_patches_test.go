@@ -82,7 +82,7 @@ func TestGenerateDeploymentEnvPatches(t *testing.T) {
 		},
 	}
 
-	patch := generateDeploymentEnvPatches("openwebui", "openwebui", envPatches)
+	patch := generateDeploymentEnvPatches("openwebui", []string{"openwebui"}, envPatches)
 	if patch == nil {
 		t.Fatal("expected non-nil patch")
 	}
@@ -110,7 +110,7 @@ func TestGenerateDeploymentEnvPatches(t *testing.T) {
 }
 
 func TestGenerateDeploymentEnvPatchesEmpty(t *testing.T) {
-	patch := generateDeploymentEnvPatches("app", "app", nil)
+	patch := generateDeploymentEnvPatches("app", nil, nil)
 	if patch != nil {
 		t.Error("expected nil patch for empty env patches")
 	}
@@ -191,7 +191,7 @@ func TestGeneratePostRendererPatch(t *testing.T) {
 		},
 	}
 
-	patch := generatePostRendererPatch("nextcloud", "nextcloud", envPatches)
+	patch := generatePostRendererPatch("nextcloud", []string{"nextcloud"}, envPatches)
 	if patch == nil {
 		t.Fatal("expected non-nil patch")
 	}
@@ -231,9 +231,67 @@ func TestGeneratePostRendererPatch(t *testing.T) {
 }
 
 func TestGeneratePostRendererPatchEmpty(t *testing.T) {
-	patch := generatePostRendererPatch("app", "app", nil)
+	patch := generatePostRendererPatch("app", nil, nil)
 	if patch != nil {
 		t.Error("expected nil for empty env patches")
+	}
+}
+
+func TestGeneratePostRendererPatchMultiContainer(t *testing.T) {
+	envPatches := []EnvPatch{
+		{Name: "REDIS_HOST", Value: "redis-preview.preview-pr-8.svc.cluster.local"},
+		{
+			Name: "OIDC_CLIENT_SECRET",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "preview-oidc-client-secret-8"},
+					Key:                  "client_secret",
+				},
+			},
+		},
+	}
+
+	patch := generatePostRendererPatch("nextcloud", []string{"nextcloud", "nextcloud-cron"}, envPatches)
+	if patch == nil {
+		t.Fatal("expected non-nil patch")
+	}
+
+	// Both containers should be present
+	if !strings.Contains(patch.Patch, "name: nextcloud\n") {
+		t.Error("patch missing nextcloud container")
+	}
+	if !strings.Contains(patch.Patch, "name: nextcloud-cron") {
+		t.Error("patch missing nextcloud-cron container")
+	}
+
+	// Both containers should have env vars
+	// Count occurrences of REDIS_HOST — should be 2 (one per container)
+	if strings.Count(patch.Patch, "REDIS_HOST") != 2 {
+		t.Errorf("expected REDIS_HOST to appear 2 times, got %d", strings.Count(patch.Patch, "REDIS_HOST"))
+	}
+	if strings.Count(patch.Patch, "OIDC_CLIENT_SECRET") != 2 {
+		t.Errorf("expected OIDC_CLIENT_SECRET to appear 2 times, got %d", strings.Count(patch.Patch, "OIDC_CLIENT_SECRET"))
+	}
+}
+
+func TestGenerateDeploymentEnvPatchesMultiContainer(t *testing.T) {
+	envPatches := []EnvPatch{
+		{Name: "DATABASE_HOST", Value: "postgres-preview-7-rw.preview-pr-7.svc.cluster.local"},
+	}
+
+	patch := generateDeploymentEnvPatches("myapp", []string{"myapp", "myapp-worker"}, envPatches)
+	if patch == nil {
+		t.Fatal("expected non-nil patch")
+	}
+
+	if !strings.Contains(patch.Patch, "name: myapp\n") {
+		t.Error("patch missing myapp container")
+	}
+	if !strings.Contains(patch.Patch, "name: myapp-worker") {
+		t.Error("patch missing myapp-worker container")
+	}
+	if strings.Count(patch.Patch, "DATABASE_HOST") != 2 {
+		t.Errorf("expected DATABASE_HOST to appear 2 times, got %d", strings.Count(patch.Patch, "DATABASE_HOST"))
 	}
 }
 
@@ -320,6 +378,7 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 				AppURL:       "nextcloud.host",
 			},
 			EnvMapping: &v1.EnvMapping{
+				ContainerNames:   []string{"nextcloud", "nextcloud-cron"},
 				RedisHost:        "REDIS_HOST",
 				OIDCClientSecret: "OIDC_CLIENT_SECRET",
 			},
@@ -343,6 +402,13 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 				}
 				if !strings.Contains(p.Patch, "preview-oidc-client-secret-8") {
 					t.Error("postRenderer missing OIDC secret ref")
+				}
+				// Both containers should be patched
+				if !strings.Contains(p.Patch, "name: nextcloud-cron") {
+					t.Error("postRenderer missing nextcloud-cron container")
+				}
+				if strings.Count(p.Patch, "REDIS_HOST") != 2 {
+					t.Errorf("expected REDIS_HOST 2 times (one per container), got %d", strings.Count(p.Patch, "REDIS_HOST"))
 				}
 			} else {
 				foundHelmValues = true

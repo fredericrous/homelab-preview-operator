@@ -65,14 +65,15 @@ func generateStripPatches() []kustomize.Patch {
 }
 
 // generateDeploymentEnvPatches creates a strategic merge patch for a Deployment
-// that overrides environment variables for the preview.
-func generateDeploymentEnvPatches(appName, containerName string, envPatches []EnvPatch) *kustomize.Patch {
+// that overrides environment variables for the preview. Multiple container names
+// are supported — each container gets the same env overrides.
+func generateDeploymentEnvPatches(appName string, containerNames []string, envPatches []EnvPatch) *kustomize.Patch {
 	if len(envPatches) == 0 {
 		return nil
 	}
 
-	if containerName == "" {
-		containerName = appName
+	if len(containerNames) == 0 {
+		containerNames = []string{appName}
 	}
 
 	var envLines []string
@@ -86,6 +87,13 @@ func generateDeploymentEnvPatches(appName, containerName string, envPatches []En
 			))
 		}
 	}
+	envBlock := strings.Join(envLines, "\n")
+
+	var containerEntries []string
+	for _, cn := range containerNames {
+		containerEntries = append(containerEntries, fmt.Sprintf(
+			"        - name: %s\n          env:\n%s", cn, envBlock))
+	}
 
 	patch := fmt.Sprintf(`apiVersion: apps/v1
 kind: Deployment
@@ -95,9 +103,7 @@ spec:
   template:
     spec:
       containers:
-        - name: %s
-          env:
-%s`, appName, containerName, strings.Join(envLines, "\n"))
+%s`, appName, strings.Join(containerEntries, "\n"))
 
 	return &kustomize.Patch{
 		Target: &kustomize.Selector{
@@ -167,17 +173,18 @@ spec:
 // to override container env vars by name. This is used instead of patching Helm
 // values array indices (e.g., extraEnv[0].value) which are fragile.
 // The postRenderer applies a strategic merge on the rendered Deployment, using
-// the env var name as the merge key.
-func generatePostRendererPatch(appName, containerName string, envPatches []EnvPatch) *kustomize.Patch {
+// the env var name as the merge key. Multiple container names are supported —
+// each container gets the same env overrides.
+func generatePostRendererPatch(appName string, containerNames []string, envPatches []EnvPatch) *kustomize.Patch {
 	if len(envPatches) == 0 {
 		return nil
 	}
 
-	if containerName == "" {
-		containerName = appName
+	if len(containerNames) == 0 {
+		containerNames = []string{appName}
 	}
 
-	// Build env YAML lines for the inner Deployment patch
+	// Build env YAML lines (shared across all containers)
 	var envLines []string
 	for _, ep := range envPatches {
 		if ep.ValueFrom != nil && ep.ValueFrom.SecretKeyRef != nil {
@@ -189,6 +196,14 @@ func generatePostRendererPatch(appName, containerName string, envPatches []EnvPa
 				"            - name: %s\n              value: %q", ep.Name, ep.Value))
 		}
 	}
+	envBlock := strings.Join(envLines, "\n")
+
+	// Build container entries for the inner Deployment strategic merge patch
+	var containerEntries []string
+	for _, cn := range containerNames {
+		containerEntries = append(containerEntries, fmt.Sprintf(
+			"        - name: %s\n          env:\n%s", cn, envBlock))
+	}
 
 	// Build the inner Deployment strategic merge patch
 	innerPatch := fmt.Sprintf(`apiVersion: apps/v1
@@ -199,9 +214,7 @@ spec:
   template:
     spec:
       containers:
-        - name: %s
-          env:
-%s`, appName, containerName, strings.Join(envLines, "\n"))
+%s`, appName, strings.Join(containerEntries, "\n"))
 
 	// Indent inner patch for embedding as a YAML block scalar (14 spaces)
 	indentedPatch := indentYAML(innerPatch, 14)
@@ -277,7 +290,8 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 				}
 			}
 
-			if p := generatePostRendererPatch(appName, appName, envPatches); p != nil {
+			containerNames := config.Spec.EnvMapping.ContainerNames
+			if p := generatePostRendererPatch(appName, containerNames, envPatches); p != nil {
 				allPatches = append(allPatches, *p)
 			}
 		}
@@ -301,8 +315,8 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 				}
 			}
 
-			containerName := appName
-			if p := generateDeploymentEnvPatches(appName, containerName, envPatches); p != nil {
+			containerNames := config.Spec.EnvMapping.ContainerNames
+			if p := generateDeploymentEnvPatches(appName, containerNames, envPatches); p != nil {
 				allPatches = append(allPatches, *p)
 			}
 		}
