@@ -387,7 +387,8 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 
 	patches := buildAllPatches("nextcloud", "8", "preview-pr-8", "daddyshome.fr", config, "/apps/user_oidc/code")
 
-	// Should have strip patches + helm value patch + postRenderer patch
+	// Should have strip patches + valuesFrom strip + helm value patch + postRenderer patch
+	foundValuesFromStrip := false
 	foundHelmValues := false
 	foundPostRenderer := false
 	for _, p := range patches {
@@ -410,6 +411,8 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 				if strings.Count(p.Patch, "REDIS_HOST") != 2 {
 					t.Errorf("expected REDIS_HOST 2 times (one per container), got %d", strings.Count(p.Patch, "REDIS_HOST"))
 				}
+			} else if strings.Contains(p.Patch, "valuesFrom: []") {
+				foundValuesFromStrip = true
 			} else {
 				foundHelmValues = true
 				if !strings.Contains(p.Patch, "externalDatabase") {
@@ -417,6 +420,9 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 				}
 			}
 		}
+	}
+	if !foundValuesFromStrip {
+		t.Error("missing valuesFrom strip patch")
 	}
 	if !foundHelmValues {
 		t.Error("missing HelmRelease value patch")
