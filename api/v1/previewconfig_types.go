@@ -189,6 +189,11 @@ type HelmValuesMapping struct {
 	// App URL
 	// +optional
 	AppURL string `json:"appUrl,omitempty"`
+
+	// ExtraValues are arbitrary key-value pairs to set in the HelmRelease.
+	// Keys use dot notation (e.g., "gitea.admin.existingSecret").
+	// +optional
+	ExtraValues map[string]string `json:"extraValues,omitempty"`
 }
 
 // +kubebuilder:object:root=true

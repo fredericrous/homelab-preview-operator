@@ -1127,6 +1127,11 @@ func (h *PreviewHandler) buildHelmValuePatches(namespace, appName, prNumber stri
 		patches[mapping.S3Bucket] = appName
 	}
 
+	// Extra values (arbitrary overrides)
+	for k, v := range mapping.ExtraValues {
+		patches[k] = v
+	}
+
 	return patches
 }
 

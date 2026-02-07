@@ -145,6 +145,13 @@ spec:
                     type: string
                   databaseUser:
                     type: string
+                  extraValues:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      ExtraValues are arbitrary key-value pairs to set in the HelmRelease.
+                      Keys use dot notation (e.g., "gitea.admin.existingSecret").
+                    type: object
                   oidcClientId:
                     description: OIDC configuration
                     type: string
