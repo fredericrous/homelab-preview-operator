@@ -143,9 +143,9 @@ func generateHelmValuePatches(appName string, valuePatches map[string]string) []
 		if containsArrayIndex(path) {
 			jsonPath := dotPathToJSONPointer(path)
 			json6902Ops = append(json6902Ops, fmt.Sprintf(
-				`  - op: replace
-    path: /spec/values%s
-    value: %s`, jsonPath, quoteJSON6902Value(value)))
+				`- op: replace
+  path: /spec/values%s
+  value: %s`, jsonPath, quoteJSON6902Value(value)))
 		} else {
 			simplePaths[path] = value
 		}
@@ -180,8 +180,7 @@ spec:
 
 	// JSON6902 patch for array-indexed paths
 	if len(json6902Ops) > 0 {
-		patch := fmt.Sprintf("- op: test\n  path: /apiVersion\n  value: helm.toolkit.fluxcd.io/v2\n%s",
-			strings.Join(json6902Ops, "\n"))
+		patch := strings.Join(json6902Ops, "\n")
 		patches = append(patches, kustomize.Patch{
 			Target: &kustomize.Selector{
 				Group: "helm.toolkit.fluxcd.io",
