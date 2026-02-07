@@ -246,6 +246,13 @@ func (h *PreviewHandler) UpdateDBCredentialPatches(ctx context.Context, ks *kust
 	}
 
 	h.log.Info("Updated Kustomization patches with DB credentials", "app", appName)
+
+	// Direct-patch the HelmRelease to work around kustomize strategic merge issues
+	// with x-kubernetes-preserve-unknown-fields on spec.values
+	if _, err := h.ensureHelmReleaseValues(ctx, namespace, appName); err != nil {
+		h.log.Info("Could not directly patch HelmRelease (will retry on next reconcile)", "error", err)
+	}
+
 	return nil
 }
 
@@ -1193,6 +1200,86 @@ func (h *PreviewHandler) buildHelmValuePatches(namespace, appName, prNumber stri
 	}
 
 	return patches
+}
+
+// ensureHelmReleaseValues directly patches the HelmRelease's spec.values via the
+// Kubernetes API. This works around kustomize's inability to deep-merge spec.values
+// on HelmRelease (CRD uses x-kubernetes-preserve-unknown-fields: true, causing
+// strategic merge to not overwrite existing keys).
+// Returns true if the HelmRelease was patched, false if values were already correct.
+func (h *PreviewHandler) ensureHelmReleaseValues(ctx context.Context, namespace, appName string) (bool, error) {
+	prNumber := strings.TrimPrefix(namespace, "preview-pr-")
+
+	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	if err != nil {
+		return false, nil
+	}
+
+	if config.Spec.DeploymentType != v1.DeploymentTypeHelm || config.Spec.HelmValues == nil {
+		return false, nil
+	}
+
+	// Read DB credentials if available
+	var dbCreds *DBCredentials
+	secretName := fmt.Sprintf("postgres-preview-%s-superuser", prNumber)
+	secret := &corev1.Secret{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret); err == nil {
+		dbCreds = &DBCredentials{
+			Username: string(secret.Data["username"]),
+			Password: string(secret.Data["password"]),
+		}
+	}
+
+	// Read the HelmRelease
+	hr := &unstructured.Unstructured{}
+	hr.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "helm.toolkit.fluxcd.io",
+		Version: "v2",
+		Kind:    "HelmRelease",
+	})
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: appName}, hr); err != nil {
+		return false, nil // Not created yet
+	}
+
+	// Get current spec.values
+	values, _, _ := unstructured.NestedMap(hr.Object, "spec", "values")
+	if values == nil {
+		values = make(map[string]interface{})
+	}
+
+	// Build the full value patches
+	patches := h.buildHelmValuePatches(namespace, appName, prNumber, config, dbCreds)
+
+	// Check if values already match
+	modified := false
+	for path, value := range patches {
+		if h.setNestedValue(values, path, value) {
+			modified = true
+		}
+	}
+
+	// Also strip valuesFrom if still present
+	valuesFrom, found, _ := unstructured.NestedSlice(hr.Object, "spec", "valuesFrom")
+	if found && len(valuesFrom) > 0 {
+		if err := unstructured.SetNestedSlice(hr.Object, []interface{}{}, "spec", "valuesFrom"); err != nil {
+			return false, err
+		}
+		modified = true
+	}
+
+	if !modified {
+		return false, nil
+	}
+
+	if err := unstructured.SetNestedMap(hr.Object, values, "spec", "values"); err != nil {
+		return false, err
+	}
+	if err := h.client.Update(ctx, hr); err != nil {
+		return false, fmt.Errorf("failed to directly patch HelmRelease values: %w", err)
+	}
+
+	h.log.Info("Directly patched HelmRelease with preview values", "app", appName)
+	return true, nil
 }
 
 // setOrUpdateEnv sets or updates an environment variable in a container

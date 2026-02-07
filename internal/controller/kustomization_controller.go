@@ -140,6 +140,17 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
+
+		// Ensure HelmRelease has correct preview values (kustomize merge may not
+		// deep-merge spec.values due to x-kubernetes-preserve-unknown-fields)
+		patched, err := handler.ensureHelmReleaseValues(ctx, ks.Namespace, appName)
+		if err != nil {
+			log.Info("Failed to ensure HelmRelease values", "error", err)
+		}
+		if patched {
+			log.Info("Re-applied HelmRelease preview values", "app", appName)
+			return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
