@@ -360,7 +360,13 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 		return nil
 	}
 
-	h.log.Info("App uses PostgreSQL, setting up CNPG cluster from snapshot", "cluster", clusterName)
+	// CNPG cluster may live in a different namespace (e.g. shared "postgres" namespace)
+	clusterNamespace := prodNS.Annotations["postgres.cnpg.io/cluster-namespace"]
+	if clusterNamespace == "" {
+		clusterNamespace = "postgres"
+	}
+
+	h.log.Info("App uses PostgreSQL, setting up CNPG cluster from snapshot", "cluster", clusterName, "clusterNamespace", clusterNamespace)
 
 	// --- Find the primary PVC name from the CNPG cluster ---
 	prodCluster := &unstructured.Unstructured{}
@@ -368,7 +374,7 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 		Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster",
 	})
 	if err := h.client.Get(ctx, types.NamespacedName{
-		Namespace: appName, Name: clusterName,
+		Namespace: clusterNamespace, Name: clusterName,
 	}, prodCluster); err != nil {
 		return fmt.Errorf("failed to get production CNPG cluster: %w", err)
 	}
@@ -382,7 +388,7 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 	// --- Create on-demand VolumeSnapshot in production namespace ---
 	snapshotClass := "ceph-block-snapshot"
 	prodSnapshotName := fmt.Sprintf("postgres-preview-pr-%s", prNumber)
-	h.log.Info("Creating database snapshot in production namespace", "namespace", appName, "pvc", primaryPVC)
+	h.log.Info("Creating database snapshot in production namespace", "namespace", clusterNamespace, "pvc", primaryPVC)
 
 	prodSnapshot := &unstructured.Unstructured{}
 	prodSnapshot.SetGroupVersionKind(schema.GroupVersionKind{
@@ -390,7 +396,7 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 		Version: "v1",
 		Kind:    "VolumeSnapshot",
 	})
-	prodSnapshot.SetNamespace(appName)
+	prodSnapshot.SetNamespace(clusterNamespace)
 	prodSnapshot.SetName(prodSnapshotName)
 	prodSnapshot.SetLabels(map[string]string{
 		"preview.homelab/pr":   prNumber,
@@ -412,7 +418,7 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 	}
 
 	// --- Wait for snapshot readiness ---
-	if err := h.waitForSnapshotReady(ctx, appName, prodSnapshotName); err != nil {
+	if err := h.waitForSnapshotReady(ctx, clusterNamespace, prodSnapshotName); err != nil {
 		return fmt.Errorf("production database snapshot not ready: %w", err)
 	}
 
@@ -423,7 +429,7 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 		Version: "v1",
 		Kind:    "VolumeSnapshot",
 	})
-	if err := h.client.Get(ctx, types.NamespacedName{Namespace: appName, Name: prodSnapshotName}, prodSnapshot); err != nil {
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: clusterNamespace, Name: prodSnapshotName}, prodSnapshot); err != nil {
 		return fmt.Errorf("failed to re-read production snapshot: %w", err)
 	}
 
