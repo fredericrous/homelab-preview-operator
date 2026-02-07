@@ -2,7 +2,6 @@ package controller
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	kustomize "github.com/fluxcd/pkg/apis/kustomize"
@@ -36,9 +35,6 @@ var stripTargets = []infrastructureStripTarget{
 	{Group: "generators.external-secrets.io", Kind: "Password"},
 	{Group: "postgresql.cnpg.io", Kind: "Database"},
 }
-
-// arrayIndexRegex matches segments like "extraEnv[0]"
-var arrayIndexRegex = regexp.MustCompile(`^(.+)\[(\d+)\]$`)
 
 // generateStripPatches produces $patch: delete patches for all infrastructure resources
 // that should be excluded from preview namespaces.
@@ -127,40 +123,29 @@ func buildEnvVarFromYAML(ep EnvPatch) string {
 	)
 }
 
-// generateHelmValuePatches creates patches for a HelmRelease.
-// Simple dot-notation paths use strategic merge. Paths with array indices (e.g.
-// "nextcloud.extraEnv[0].value") use JSON6902 replace operations.
-func generateHelmValuePatches(appName string, valuePatches map[string]string) []kustomize.Patch {
+// generateHelmValuePatches creates a strategic merge patch for a HelmRelease.
+// Only supports simple dot-notation paths. For env var overrides, use
+// generatePostRendererPatch instead.
+func generateHelmValuePatches(appName string, valuePatches map[string]string) *kustomize.Patch {
 	if len(valuePatches) == 0 {
 		return nil
 	}
 
-	// Split into simple paths and array-indexed paths
-	simplePaths := make(map[string]string)
-	var json6902Ops []string
-
+	root := make(map[string]interface{})
 	for path, value := range valuePatches {
-		if containsArrayIndex(path) {
-			jsonPath := dotPathToJSONPointer(path)
-			json6902Ops = append(json6902Ops, fmt.Sprintf(
-				`- op: replace
-  path: /spec/values%s
-  value: %s`, jsonPath, quoteJSON6902Value(value)))
-		} else {
-			simplePaths[path] = value
+		// Skip array-indexed paths — these should use envMapping with postRenderers
+		if strings.Contains(path, "[") {
+			continue
 		}
+		setNestedMapValue(root, path, value)
 	}
 
-	var patches []kustomize.Patch
+	if len(root) == 0 {
+		return nil
+	}
 
-	// Strategic merge patch for simple paths
-	if len(simplePaths) > 0 {
-		root := make(map[string]interface{})
-		for path, value := range simplePaths {
-			setNestedMapValue(root, path, value)
-		}
-		valuesYAML := renderYAMLMap(root, 4)
-		patch := fmt.Sprintf(`apiVersion: helm.toolkit.fluxcd.io/v2
+	valuesYAML := renderYAMLMap(root, 4)
+	patch := fmt.Sprintf(`apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
   name: %s
@@ -168,54 +153,90 @@ spec:
   values:
 %s`, appName, valuesYAML)
 
-		patches = append(patches, kustomize.Patch{
-			Target: &kustomize.Selector{
-				Group: "helm.toolkit.fluxcd.io",
-				Kind:  "HelmRelease",
-				Name:  appName,
-			},
-			Patch: patch,
-		})
+	return &kustomize.Patch{
+		Target: &kustomize.Selector{
+			Group: "helm.toolkit.fluxcd.io",
+			Kind:  "HelmRelease",
+			Name:  appName,
+		},
+		Patch: patch,
 	}
-
-	// JSON6902 patch for array-indexed paths
-	if len(json6902Ops) > 0 {
-		patch := strings.Join(json6902Ops, "\n")
-		patches = append(patches, kustomize.Patch{
-			Target: &kustomize.Selector{
-				Group: "helm.toolkit.fluxcd.io",
-				Kind:  "HelmRelease",
-				Name:  appName,
-			},
-			Patch: patch,
-		})
-	}
-
-	return patches
 }
 
-// containsArrayIndex checks if a dot-notation path has array indices like [0]
-func containsArrayIndex(path string) bool {
-	return strings.Contains(path, "[")
-}
+// generatePostRendererPatch creates a HelmRelease patch that adds a postRenderer
+// to override container env vars by name. This is used instead of patching Helm
+// values array indices (e.g., extraEnv[0].value) which are fragile.
+// The postRenderer applies a strategic merge on the rendered Deployment, using
+// the env var name as the merge key.
+func generatePostRendererPatch(appName, containerName string, envPatches []EnvPatch) *kustomize.Patch {
+	if len(envPatches) == 0 {
+		return nil
+	}
 
-// dotPathToJSONPointer converts "nextcloud.extraEnv[0].value" to "/nextcloud/extraEnv/0/value"
-func dotPathToJSONPointer(path string) string {
-	parts := strings.Split(path, ".")
-	var result []string
-	for _, part := range parts {
-		if m := arrayIndexRegex.FindStringSubmatch(part); m != nil {
-			result = append(result, "/"+m[1], "/"+m[2])
+	if containerName == "" {
+		containerName = appName
+	}
+
+	// Build env YAML lines for the inner Deployment patch
+	var envLines []string
+	for _, ep := range envPatches {
+		if ep.ValueFrom != nil && ep.ValueFrom.SecretKeyRef != nil {
+			envLines = append(envLines, fmt.Sprintf(
+				"            - name: %s\n              valueFrom:\n                secretKeyRef:\n                  name: %s\n                  key: %s",
+				ep.Name, ep.ValueFrom.SecretKeyRef.Name, ep.ValueFrom.SecretKeyRef.Key))
 		} else {
-			result = append(result, "/"+part)
+			envLines = append(envLines, fmt.Sprintf(
+				"            - name: %s\n              value: %q", ep.Name, ep.Value))
 		}
 	}
-	return strings.Join(result, "")
+
+	// Build the inner Deployment strategic merge patch
+	innerPatch := fmt.Sprintf(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %s
+spec:
+  template:
+    spec:
+      containers:
+        - name: %s
+          env:
+%s`, appName, containerName, strings.Join(envLines, "\n"))
+
+	// Indent inner patch for embedding as a YAML block scalar (14 spaces)
+	indentedPatch := indentYAML(innerPatch, 14)
+
+	patch := fmt.Sprintf(`apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: %s
+spec:
+  postRenderers:
+    - kustomize:
+        patches:
+          - patch: |
+%s`, appName, indentedPatch)
+
+	return &kustomize.Patch{
+		Target: &kustomize.Selector{
+			Group: "helm.toolkit.fluxcd.io",
+			Kind:  "HelmRelease",
+			Name:  appName,
+		},
+		Patch: patch,
+	}
 }
 
-// quoteJSON6902Value returns the value as a JSON-safe string for JSON6902 patches
-func quoteJSON6902Value(value string) string {
-	return fmt.Sprintf("%q", value)
+// indentYAML adds the given number of spaces to the beginning of each non-empty line
+func indentYAML(s string, spaces int) string {
+	prefix := strings.Repeat(" ", spaces)
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		if lines[i] != "" {
+			lines[i] = prefix + lines[i]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // buildAllPatches combines all patch types for a preview Kustomization
@@ -228,18 +249,39 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 	// 2. App-specific patches based on deployment type
 	switch config.Spec.DeploymentType {
 	case v1.DeploymentTypeHelm:
-		if config.Spec.HelmValues != nil {
-			h := &PreviewHandler{previewDomain: previewDomain}
-			valuePatches := h.buildHelmValuePatches(namespace, appName, prNumber, config)
+		h := &PreviewHandler{previewDomain: previewDomain}
 
-			// Patch OIDC client secret reference to use operator-created secret
-			if config.Spec.HelmValues.OIDCClientSecret != "" {
-				valuePatches[config.Spec.HelmValues.OIDCClientSecret] = fmt.Sprintf("preview-oidc-client-secret-%s", prNumber)
+		// Helm value patches (simple dot-paths for HelmRelease spec.values)
+		if config.Spec.HelmValues != nil {
+			valuePatches := h.buildHelmValuePatches(namespace, appName, prNumber, config)
+			if p := generateHelmValuePatches(appName, valuePatches); p != nil {
+				allPatches = append(allPatches, *p)
+			}
+		}
+
+		// Env var overrides via postRenderers (for values injected as container env vars)
+		if config.Spec.EnvMapping != nil {
+			envPatches := h.buildEnvPatches(namespace, appName, prNumber, config)
+
+			// Override OIDC secret name to include PR number
+			for i := range envPatches {
+				if envPatches[i].Name == config.Spec.EnvMapping.OIDCClientSecret {
+					envPatches[i].ValueFrom = &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: fmt.Sprintf("preview-oidc-client-secret-%s", prNumber),
+							},
+							Key: "client_secret",
+						},
+					}
+				}
 			}
 
-			helmPatches := generateHelmValuePatches(appName, valuePatches)
-			allPatches = append(allPatches, helmPatches...)
+			if p := generatePostRendererPatch(appName, appName, envPatches); p != nil {
+				allPatches = append(allPatches, *p)
+			}
 		}
+
 	default:
 		if config.Spec.EnvMapping != nil {
 			h := &PreviewHandler{previewDomain: previewDomain}

@@ -122,78 +122,118 @@ func TestGenerateHelmValuePatches(t *testing.T) {
 		"gitea.config.database.DB_TYPE": "postgres",
 	}
 
-	patches := generateHelmValuePatches("gitea", valuePatches)
-	if len(patches) == 0 {
-		t.Fatal("expected non-empty patches")
+	patch := generateHelmValuePatches("gitea", valuePatches)
+	if patch == nil {
+		t.Fatal("expected non-nil patch")
 	}
 
-	// Simple paths should produce a strategic merge patch
-	found := false
-	for _, p := range patches {
-		if p.Target.Kind == "HelmRelease" && strings.Contains(p.Patch, "kind: HelmRelease") {
-			found = true
-		}
+	if patch.Target.Kind != "HelmRelease" {
+		t.Errorf("expected HelmRelease target, got %s", patch.Target.Kind)
 	}
-	if !found {
-		t.Error("missing strategic merge HelmRelease patch")
+	if !strings.Contains(patch.Patch, "kind: HelmRelease") {
+		t.Error("missing HelmRelease kind in patch")
+	}
+	if !strings.Contains(patch.Patch, "HOST") {
+		t.Error("missing HOST in patch")
 	}
 }
 
-func TestGenerateHelmValuePatchesArrayIndex(t *testing.T) {
+func TestGenerateHelmValuePatchesSkipsArrayPaths(t *testing.T) {
 	valuePatches := map[string]string{
-		"nextcloud.extraEnv[0].value": "redis-preview.preview-pr-8.svc.cluster.local",
+		"nextcloud.extraEnv[0].value": "should-be-skipped",
 		"externalDatabase.host":       "postgres-preview-8-rw.preview-pr-8.svc.cluster.local",
 	}
 
-	patches := generateHelmValuePatches("nextcloud", valuePatches)
-	if len(patches) < 2 {
-		t.Fatalf("expected at least 2 patches (strategic merge + json6902), got %d", len(patches))
+	patch := generateHelmValuePatches("nextcloud", valuePatches)
+	if patch == nil {
+		t.Fatal("expected non-nil patch for simple path")
 	}
 
-	// Should have a JSON6902 patch for array-indexed path
-	foundJSON6902 := false
-	for _, p := range patches {
-		if strings.Contains(p.Patch, "op: replace") && strings.Contains(p.Patch, "/spec/values/nextcloud/extraEnv/0/value") {
-			foundJSON6902 = true
-		}
+	// Array-indexed path should be skipped
+	if strings.Contains(patch.Patch, "extraEnv") {
+		t.Error("array-indexed path should be skipped")
 	}
-	if !foundJSON6902 {
-		t.Error("missing JSON6902 patch for array-indexed path")
+	// Simple path should be present
+	if !strings.Contains(patch.Patch, "externalDatabase") {
+		t.Error("simple path should be present")
+	}
+}
+
+func TestGenerateHelmValuePatchesOnlyArrayPaths(t *testing.T) {
+	valuePatches := map[string]string{
+		"nextcloud.extraEnv[0].value": "should-be-skipped",
 	}
 
-	// Should have a strategic merge patch for simple path
-	foundStrategic := false
-	for _, p := range patches {
-		if strings.Contains(p.Patch, "kind: HelmRelease") && strings.Contains(p.Patch, "externalDatabase") {
-			foundStrategic = true
-		}
-	}
-	if !foundStrategic {
-		t.Error("missing strategic merge patch for simple path")
+	patch := generateHelmValuePatches("nextcloud", valuePatches)
+	if patch != nil {
+		t.Error("expected nil when all paths are array-indexed")
 	}
 }
 
 func TestGenerateHelmValuePatchesEmpty(t *testing.T) {
-	patches := generateHelmValuePatches("app", nil)
-	if len(patches) != 0 {
-		t.Error("expected empty patches for nil input")
+	patch := generateHelmValuePatches("app", nil)
+	if patch != nil {
+		t.Error("expected nil patch for nil input")
 	}
 }
 
-func TestDotPathToJSONPointer(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"nextcloud.extraEnv[0].value", "/nextcloud/extraEnv/0/value"},
-		{"nextcloud.extraEnv[3].valueFrom.secretKeyRef.name", "/nextcloud/extraEnv/3/valueFrom/secretKeyRef/name"},
-		{"simple.path", "/simple/path"},
+func TestGeneratePostRendererPatch(t *testing.T) {
+	envPatches := []EnvPatch{
+		{Name: "REDIS_HOST", Value: "redis-preview.preview-pr-8.svc.cluster.local"},
+		{
+			Name: "OIDC_CLIENT_SECRET",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "preview-oidc-client-secret-8"},
+					Key:                  "client_secret",
+				},
+			},
+		},
 	}
-	for _, tt := range tests {
-		got := dotPathToJSONPointer(tt.input)
-		if got != tt.expected {
-			t.Errorf("dotPathToJSONPointer(%q) = %q, want %q", tt.input, got, tt.expected)
-		}
+
+	patch := generatePostRendererPatch("nextcloud", "nextcloud", envPatches)
+	if patch == nil {
+		t.Fatal("expected non-nil patch")
+	}
+
+	if patch.Target.Kind != "HelmRelease" {
+		t.Errorf("expected HelmRelease target, got %s", patch.Target.Kind)
+	}
+	if patch.Target.Name != "nextcloud" {
+		t.Errorf("expected target name nextcloud, got %s", patch.Target.Name)
+	}
+
+	// Should contain postRenderers
+	if !strings.Contains(patch.Patch, "postRenderers") {
+		t.Error("patch missing postRenderers")
+	}
+
+	// Should contain inner Deployment patch
+	if !strings.Contains(patch.Patch, "kind: Deployment") {
+		t.Error("inner patch missing Deployment kind")
+	}
+
+	// Should contain env vars by name
+	if !strings.Contains(patch.Patch, "REDIS_HOST") {
+		t.Error("patch missing REDIS_HOST")
+	}
+	if !strings.Contains(patch.Patch, "OIDC_CLIENT_SECRET") {
+		t.Error("patch missing OIDC_CLIENT_SECRET")
+	}
+	if !strings.Contains(patch.Patch, "preview-oidc-client-secret-8") {
+		t.Error("patch missing secretKeyRef name")
+	}
+
+	// Should be a valid HelmRelease patch
+	if !strings.Contains(patch.Patch, "kind: HelmRelease") {
+		t.Error("outer patch missing HelmRelease kind")
+	}
+}
+
+func TestGeneratePostRendererPatchEmpty(t *testing.T) {
+	patch := generatePostRendererPatch("app", "app", nil)
+	if patch != nil {
+		t.Error("expected nil for empty env patches")
 	}
 }
 
@@ -269,6 +309,57 @@ func TestBuildAllPatchesHelm(t *testing.T) {
 	}
 }
 
+func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
+	config := &v1.PreviewConfig{
+		Spec: v1.PreviewConfigSpec{
+			DeploymentType: v1.DeploymentTypeHelm,
+			Redis:          &v1.RedisConfig{Enabled: true},
+			HelmValues: &v1.HelmValuesMapping{
+				DatabaseHost: "externalDatabase.host",
+				DatabaseName: "externalDatabase.database",
+				AppURL:       "nextcloud.host",
+			},
+			EnvMapping: &v1.EnvMapping{
+				RedisHost:        "REDIS_HOST",
+				OIDCClientSecret: "OIDC_CLIENT_SECRET",
+			},
+		},
+	}
+
+	patches := buildAllPatches("nextcloud", "8", "preview-pr-8", "daddyshome.fr", config, "/apps/user_oidc/code")
+
+	// Should have strip patches + helm value patch + postRenderer patch
+	foundHelmValues := false
+	foundPostRenderer := false
+	for _, p := range patches {
+		if p.Target != nil && p.Target.Kind == "HelmRelease" {
+			if strings.Contains(p.Patch, "postRenderers") {
+				foundPostRenderer = true
+				if !strings.Contains(p.Patch, "REDIS_HOST") {
+					t.Error("postRenderer missing REDIS_HOST")
+				}
+				if !strings.Contains(p.Patch, "OIDC_CLIENT_SECRET") {
+					t.Error("postRenderer missing OIDC_CLIENT_SECRET")
+				}
+				if !strings.Contains(p.Patch, "preview-oidc-client-secret-8") {
+					t.Error("postRenderer missing OIDC secret ref")
+				}
+			} else {
+				foundHelmValues = true
+				if !strings.Contains(p.Patch, "externalDatabase") {
+					t.Error("helm values missing externalDatabase")
+				}
+			}
+		}
+	}
+	if !foundHelmValues {
+		t.Error("missing HelmRelease value patch")
+	}
+	if !foundPostRenderer {
+		t.Error("missing postRenderer patch")
+	}
+}
+
 func TestBuildAllPatchesNoConfig(t *testing.T) {
 	config := &v1.PreviewConfig{}
 
@@ -306,5 +397,14 @@ func TestGenerateRandomString(t *testing.T) {
 	}
 	if s1 == s2 {
 		t.Error("two random strings should not be equal")
+	}
+}
+
+func TestIndentYAML(t *testing.T) {
+	input := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test"
+	result := indentYAML(input, 4)
+	expected := "    apiVersion: v1\n    kind: Pod\n    metadata:\n      name: test"
+	if result != expected {
+		t.Errorf("indentYAML mismatch:\ngot:  %q\nwant: %q", result, expected)
 	}
 }

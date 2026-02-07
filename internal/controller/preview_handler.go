@@ -232,25 +232,10 @@ func generateRandomString(byteLen int) string {
 // It first checks the preview namespace, then falls back to the production namespace
 func (h *PreviewHandler) fetchPreviewConfig(ctx context.Context, namespace, appName string) (*v1.PreviewConfig, error) {
 	config := &v1.PreviewConfig{}
-
-	// First try preview namespace (if config was copied there)
-	previewName := types.NamespacedName{
-		Namespace: namespace,
-		Name:      appName,
-	}
-	if err := h.client.Get(ctx, previewName, config); err == nil {
-		return config, nil
-	}
-
-	// Fall back to production namespace (app's namespace)
-	prodName := types.NamespacedName{
-		Namespace: appName,
-		Name:      appName,
-	}
-	if err := h.client.Get(ctx, prodName, config); err != nil {
+	name := types.NamespacedName{Namespace: appName, Name: appName}
+	if err := h.client.Get(ctx, name, config); err != nil {
 		return nil, err
 	}
-
 	return config, nil
 }
 
