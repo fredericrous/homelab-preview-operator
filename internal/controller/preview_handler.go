@@ -362,26 +362,100 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 
 	h.log.Info("App uses PostgreSQL, setting up CNPG cluster from snapshot", "cluster", clusterName)
 
-	// Get the snapshot reference from ConfigMap (created by snapshot CronJob)
-	var snapshotRef corev1.ConfigMap
-	snapshotRefName := types.NamespacedName{
-		Namespace: namespace,
-		Name:      "postgres-preview-snapshot-ref",
+	// --- Find the primary PVC name from the CNPG cluster ---
+	prodCluster := &unstructured.Unstructured{}
+	prodCluster.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster",
+	})
+	if err := h.client.Get(ctx, types.NamespacedName{
+		Namespace: appName, Name: clusterName,
+	}, prodCluster); err != nil {
+		return fmt.Errorf("failed to get production CNPG cluster: %w", err)
 	}
-	if err := h.client.Get(ctx, snapshotRefName, &snapshotRef); err != nil {
-		return fmt.Errorf("failed to get snapshot reference ConfigMap: %w", err)
+	primaryPod, _, _ := unstructured.NestedString(prodCluster.Object, "status", "currentPrimary")
+	if primaryPod == "" {
+		return fmt.Errorf("CNPG cluster %s has no currentPrimary", clusterName)
+	}
+	// CNPG PVC name = pod name
+	primaryPVC := primaryPod
+
+	// --- Create on-demand VolumeSnapshot in production namespace ---
+	snapshotClass := "ceph-block-snapshot"
+	prodSnapshotName := fmt.Sprintf("postgres-preview-pr-%s", prNumber)
+	h.log.Info("Creating database snapshot in production namespace", "namespace", appName, "pvc", primaryPVC)
+
+	prodSnapshot := &unstructured.Unstructured{}
+	prodSnapshot.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "snapshot.storage.k8s.io",
+		Version: "v1",
+		Kind:    "VolumeSnapshot",
+	})
+	prodSnapshot.SetNamespace(appName)
+	prodSnapshot.SetName(prodSnapshotName)
+	prodSnapshot.SetLabels(map[string]string{
+		"preview.homelab/pr":   prNumber,
+		"preview.homelab/type": "database",
+	})
+
+	prodVSSpec := map[string]interface{}{
+		"volumeSnapshotClassName": snapshotClass,
+		"source": map[string]interface{}{
+			"persistentVolumeClaimName": primaryPVC,
+		},
+	}
+	if err := unstructured.SetNestedMap(prodSnapshot.Object, prodVSSpec, "spec"); err != nil {
+		return fmt.Errorf("failed to set production snapshot spec: %w", err)
 	}
 
-	snapshotHandle := snapshotRef.Data["snapshotHandle"]
-	restoreSize := snapshotRef.Data["restoreSize"]
-	driver := snapshotRef.Data["driver"]
-	snapshotClass := snapshotRef.Data["snapshotClassName"]
+	if err := h.createOrUpdate(ctx, prodSnapshot); err != nil {
+		return fmt.Errorf("failed to create production VolumeSnapshot: %w", err)
+	}
 
+	// --- Wait for snapshot readiness ---
+	if err := h.waitForSnapshotReady(ctx, appName, prodSnapshotName); err != nil {
+		return fmt.Errorf("production database snapshot not ready: %w", err)
+	}
+
+	// --- Read snapshot metadata (handle, driver, restoreSize) ---
+	prodSnapshot = &unstructured.Unstructured{}
+	prodSnapshot.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "snapshot.storage.k8s.io",
+		Version: "v1",
+		Kind:    "VolumeSnapshot",
+	})
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: appName, Name: prodSnapshotName}, prodSnapshot); err != nil {
+		return fmt.Errorf("failed to re-read production snapshot: %w", err)
+	}
+
+	boundVSCName, _, _ := unstructured.NestedString(prodSnapshot.Object, "status", "boundVolumeSnapshotContentName")
+	if boundVSCName == "" {
+		return fmt.Errorf("production snapshot has no boundVolumeSnapshotContentName")
+	}
+
+	boundVSC := &unstructured.Unstructured{}
+	boundVSC.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "snapshot.storage.k8s.io",
+		Version: "v1",
+		Kind:    "VolumeSnapshotContent",
+	})
+	if err := h.client.Get(ctx, types.NamespacedName{Name: boundVSCName}, boundVSC); err != nil {
+		return fmt.Errorf("failed to get bound VolumeSnapshotContent: %w", err)
+	}
+
+	snapshotHandle, _, _ := unstructured.NestedString(boundVSC.Object, "status", "snapshotHandle")
 	if snapshotHandle == "" {
-		return fmt.Errorf("snapshotHandle not found in ConfigMap")
+		return fmt.Errorf("bound VolumeSnapshotContent has no snapshotHandle")
+	}
+	driver, _, _ := unstructured.NestedString(boundVSC.Object, "spec", "driver")
+
+	restoreSize, _, _ := unstructured.NestedString(prodSnapshot.Object, "status", "restoreSize")
+	if restoreSize == "" {
+		restoreSize = "10Gi"
 	}
 
-	// Create VolumeSnapshotContent (cluster-scoped)
+	h.log.Info("Got database snapshot metadata", "handle", snapshotHandle, "driver", driver, "restoreSize", restoreSize)
+
+	// --- Create pre-provisioned VolumeSnapshotContent + VolumeSnapshot in preview namespace ---
 	vscName := fmt.Sprintf("postgres-preview-%s-content", prNumber)
 	vsName := "postgres-preview-snapshot"
 
@@ -395,6 +469,7 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 	vsc.SetLabels(map[string]string{
 		"preview.homelab/pr":        prNumber,
 		"preview.homelab/namespace": namespace,
+		"preview.homelab/type":      "database",
 	})
 
 	vscSpec := map[string]interface{}{
@@ -415,7 +490,6 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 		return fmt.Errorf("failed to create VolumeSnapshotContent: %w", err)
 	}
 
-	// Create VolumeSnapshot (namespaced)
 	vs := &unstructured.Unstructured{}
 	vs.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "snapshot.storage.k8s.io",
@@ -425,12 +499,12 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 	vs.SetNamespace(namespace)
 	vs.SetName(vsName)
 
-	vsSpec := map[string]interface{}{
+	previewVSSpec := map[string]interface{}{
 		"source": map[string]interface{}{
 			"volumeSnapshotContentName": vscName,
 		},
 	}
-	if err := unstructured.SetNestedMap(vs.Object, vsSpec, "spec"); err != nil {
+	if err := unstructured.SetNestedMap(vs.Object, previewVSSpec, "spec"); err != nil {
 		return err
 	}
 
