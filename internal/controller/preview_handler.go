@@ -1087,14 +1087,8 @@ func (h *PreviewHandler) buildHelmValuePatches(namespace, appName, prNumber stri
 	if mapping.DatabaseName != "" {
 		patches[mapping.DatabaseName] = appName
 	}
-	if mapping.DatabaseUser != "" {
-		patches[mapping.DatabaseUser] = "postgres"
-	}
-	if mapping.DatabasePassword != "" {
-		// Set to empty — the actual password is injected via env var override
-		// (postRenderer) referencing the CNPG superuser secret
-		patches[mapping.DatabasePassword] = ""
-	}
+	// DatabaseUser and DatabasePassword are NOT set here — they come from
+	// valuesFrom referencing the CNPG superuser secret (see buildAllPatches).
 
 	// Redis
 	if mapping.RedisHost != "" {

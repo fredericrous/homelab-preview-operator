@@ -373,9 +373,10 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 			DeploymentType: v1.DeploymentTypeHelm,
 			Redis:          &v1.RedisConfig{Enabled: true},
 			HelmValues: &v1.HelmValuesMapping{
-				DatabaseHost: "externalDatabase.host",
-				DatabaseName: "externalDatabase.database",
-				AppURL:       "nextcloud.host",
+				DatabaseHost:     "externalDatabase.host",
+				DatabaseName:     "externalDatabase.database",
+				DatabasePassword: "externalDatabase.password",
+				AppURL:           "nextcloud.host",
 			},
 			EnvMapping: &v1.EnvMapping{
 				ContainerNames:   []string{"nextcloud", "nextcloud-cron"},
@@ -387,8 +388,8 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 
 	patches := buildAllPatches("nextcloud", "8", "preview-pr-8", "daddyshome.fr", config, "/apps/user_oidc/code")
 
-	// Should have strip patches + valuesFrom strip + helm value patch + postRenderer patch
-	foundValuesFromStrip := false
+	// Should have strip patches + valuesFrom replace + helm value patch + postRenderer patch
+	foundValuesFromReplace := false
 	foundHelmValues := false
 	foundPostRenderer := false
 	for _, p := range patches {
@@ -411,8 +412,15 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 				if strings.Count(p.Patch, "REDIS_HOST") != 2 {
 					t.Errorf("expected REDIS_HOST 2 times (one per container), got %d", strings.Count(p.Patch, "REDIS_HOST"))
 				}
-			} else if strings.Contains(p.Patch, "valuesFrom: []") {
-				foundValuesFromStrip = true
+			} else if strings.Contains(p.Patch, "valuesFrom") {
+				foundValuesFromReplace = true
+				// Should reference CNPG superuser secret for DB password
+				if !strings.Contains(p.Patch, "postgres-preview-8-superuser") {
+					t.Error("valuesFrom missing CNPG superuser secret reference")
+				}
+				if !strings.Contains(p.Patch, "targetPath: externalDatabase.password") {
+					t.Error("valuesFrom missing password targetPath")
+				}
 			} else {
 				foundHelmValues = true
 				if !strings.Contains(p.Patch, "externalDatabase") {
@@ -421,14 +429,38 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 			}
 		}
 	}
-	if !foundValuesFromStrip {
-		t.Error("missing valuesFrom strip patch")
+	if !foundValuesFromReplace {
+		t.Error("missing valuesFrom replace patch")
 	}
 	if !foundHelmValues {
 		t.Error("missing HelmRelease value patch")
 	}
 	if !foundPostRenderer {
 		t.Error("missing postRenderer patch")
+	}
+}
+
+func TestBuildAllPatchesHelmNoDbPassword(t *testing.T) {
+	// When no DB password is configured, valuesFrom should be empty
+	config := &v1.PreviewConfig{
+		Spec: v1.PreviewConfigSpec{
+			DeploymentType: v1.DeploymentTypeHelm,
+			HelmValues: &v1.HelmValuesMapping{
+				AppURL: "app.url",
+			},
+		},
+	}
+
+	patches := buildAllPatches("myapp", "1", "preview-pr-1", "daddyshome.fr", config, "/oauth/callback")
+
+	foundEmptyValuesFrom := false
+	for _, p := range patches {
+		if p.Target != nil && p.Target.Kind == "HelmRelease" && strings.Contains(p.Patch, "valuesFrom: []") {
+			foundEmptyValuesFrom = true
+		}
+	}
+	if !foundEmptyValuesFrom {
+		t.Error("expected empty valuesFrom when no DB password configured")
 	}
 }
 

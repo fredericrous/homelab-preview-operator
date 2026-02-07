@@ -129,16 +129,43 @@ func buildEnvVarFromYAML(ep EnvPatch) string {
 	)
 }
 
-// generateValuesFromStripPatch creates a strategic merge patch that empties valuesFrom
-// on a HelmRelease. In preview, ExternalSecrets are stripped, so secrets referenced by
-// valuesFrom won't exist. Env var overrides (via postRenderers) handle the values instead.
-func generateValuesFromStripPatch(appName string) *kustomize.Patch {
+// ValuesFromEntry represents a single entry in HelmRelease spec.valuesFrom
+type ValuesFromEntry struct {
+	Kind       string // e.g. "Secret"
+	Name       string // secret/configmap name
+	ValuesKey  string // key in the secret
+	TargetPath string // Helm values dot-path
+}
+
+// generateValuesFromReplacePatch creates a strategic merge patch that replaces valuesFrom
+// on a HelmRelease. In preview, ExternalSecrets are stripped, so original secrets won't
+// exist. This replaces them with entries pointing to operator-created secrets (e.g. CNPG).
+func generateValuesFromReplacePatch(appName string, entries []ValuesFromEntry) *kustomize.Patch {
+	var valuesFrom string
+	if len(entries) == 0 {
+		valuesFrom = "  valuesFrom: []"
+	} else {
+		var lines []string
+		lines = append(lines, "  valuesFrom:")
+		for _, e := range entries {
+			kind := e.Kind
+			if kind == "" {
+				kind = "Secret"
+			}
+			lines = append(lines, fmt.Sprintf("    - kind: %s", kind))
+			lines = append(lines, fmt.Sprintf("      name: %s", e.Name))
+			lines = append(lines, fmt.Sprintf("      valuesKey: %s", e.ValuesKey))
+			lines = append(lines, fmt.Sprintf("      targetPath: %s", e.TargetPath))
+		}
+		valuesFrom = strings.Join(lines, "\n")
+	}
+
 	patch := fmt.Sprintf(`apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
   name: %s
 spec:
-  valuesFrom: []`, appName)
+%s`, appName, valuesFrom)
 
 	return &kustomize.Patch{
 		Target: &kustomize.Selector{
@@ -285,10 +312,30 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 	case v1.DeploymentTypeHelm:
 		h := &PreviewHandler{previewDomain: previewDomain}
 
-		// Strip valuesFrom — ExternalSecrets are removed in preview, so
-		// secrets referenced by valuesFrom won't exist. Values are handled
-		// via Helm value patches and env var overrides instead.
-		allPatches = append(allPatches, *generateValuesFromStripPatch(appName))
+		// Replace valuesFrom — ExternalSecrets are stripped in preview, so
+		// original secrets won't exist. Replace with entries pointing to
+		// operator-created secrets (e.g. CNPG superuser for DB credentials).
+		var valuesFromEntries []ValuesFromEntry
+		if config.Spec.HelmValues != nil {
+			secretName := fmt.Sprintf("postgres-preview-%s-superuser", prNumber)
+			if config.Spec.HelmValues.DatabasePassword != "" {
+				valuesFromEntries = append(valuesFromEntries, ValuesFromEntry{
+					Kind:       "Secret",
+					Name:       secretName,
+					ValuesKey:  "password",
+					TargetPath: config.Spec.HelmValues.DatabasePassword,
+				})
+			}
+			if config.Spec.HelmValues.DatabaseUser != "" {
+				valuesFromEntries = append(valuesFromEntries, ValuesFromEntry{
+					Kind:       "Secret",
+					Name:       secretName,
+					ValuesKey:  "username",
+					TargetPath: config.Spec.HelmValues.DatabaseUser,
+				})
+			}
+		}
+		allPatches = append(allPatches, *generateValuesFromReplacePatch(appName, valuesFromEntries))
 
 		// Helm value patches (simple dot-paths for HelmRelease spec.values)
 		if config.Spec.HelmValues != nil {
