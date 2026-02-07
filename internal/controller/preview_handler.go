@@ -115,23 +115,9 @@ func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomize
 	// Discover OIDC callback path from production
 	callbackPath := h.discoverOIDCCallbackPath(ctx, appName)
 
-	// Resolve DB credentials from CNPG superuser secret (if database is used)
-	var dbCreds *DBCredentials
-	if config.Spec.HelmValues != nil && (config.Spec.HelmValues.DatabaseUser != "" || config.Spec.HelmValues.DatabasePassword != "") {
-		secretName := fmt.Sprintf("postgres-preview-%s-superuser", prNumber)
-		secret := &corev1.Secret{}
-		if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret); err == nil {
-			dbCreds = &DBCredentials{
-				Username: string(secret.Data["username"]),
-				Password: string(secret.Data["password"]),
-			}
-		} else {
-			h.log.Info("CNPG superuser secret not found, DB credentials will be empty", "secret", secretName)
-		}
-	}
-
-	// Generate all patches
-	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, dbCreds)
+	// Generate patches without DB credentials — CNPG hasn't been created yet.
+	// DB credentials will be injected later by UpdateDBCredentialPatches (State 3).
+	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, nil)
 
 	// Apply patches to the Kustomization
 	ks.Spec.Patches = allPatches
@@ -205,6 +191,73 @@ func (h *PreviewHandler) CreateInfrastructure(ctx context.Context, ks *kustomize
 	// Note: patchWorkload is NOT called here - Kustomization patches handle env/helm overrides
 
 	return nil
+}
+
+// UpdateDBCredentialPatches waits for the CNPG superuser secret and regenerates
+// Kustomization patches with actual DB credentials. Called as State 3, after
+// CreateInfrastructure has created the CNPG cluster.
+func (h *PreviewHandler) UpdateDBCredentialPatches(ctx context.Context, ks *kustomizev1.Kustomization, appName string) error {
+	namespace := ks.Namespace
+	prNumber := strings.TrimPrefix(namespace, "preview-pr-")
+
+	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return h.setAnnotation(ctx, ks, CredentialsPatchedAnnotation, "true")
+		}
+		return err
+	}
+
+	// Check if the app needs DB credentials in Helm patches
+	needsDBCreds := config.Spec.HelmValues != nil &&
+		(config.Spec.HelmValues.DatabaseUser != "" || config.Spec.HelmValues.DatabasePassword != "")
+
+	if !needsDBCreds {
+		return h.setAnnotation(ctx, ks, CredentialsPatchedAnnotation, "true")
+	}
+
+	// Read the CNPG superuser secret
+	secretName := fmt.Sprintf("postgres-preview-%s-superuser", prNumber)
+	secret := &corev1.Secret{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret); err != nil {
+		return fmt.Errorf("CNPG superuser secret %s not yet available: %w", secretName, err)
+	}
+
+	dbCreds := &DBCredentials{
+		Username: string(secret.Data["username"]),
+		Password: string(secret.Data["password"]),
+	}
+
+	// Regenerate all patches with DB credentials
+	callbackPath := h.discoverOIDCCallbackPath(ctx, appName)
+	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, dbCreds)
+
+	// Update the Kustomization with new patches and mark credentials as patched
+	ks.Spec.Patches = allPatches
+	annotations := ks.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[CredentialsPatchedAnnotation] = "true"
+	ks.SetAnnotations(annotations)
+
+	if err := h.client.Update(ctx, ks); err != nil {
+		return fmt.Errorf("failed to update Kustomization with DB credentials: %w", err)
+	}
+
+	h.log.Info("Updated Kustomization patches with DB credentials", "app", appName)
+	return nil
+}
+
+// setAnnotation is a helper to set a single annotation on a Kustomization and persist it
+func (h *PreviewHandler) setAnnotation(ctx context.Context, ks *kustomizev1.Kustomization, key, value string) error {
+	annotations := ks.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[key] = value
+	ks.SetAnnotations(annotations)
+	return h.client.Update(ctx, ks)
 }
 
 // discoverOIDCCallbackPath reads the OIDCClient from production to extract the callback path

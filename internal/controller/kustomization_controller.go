@@ -24,6 +24,12 @@ const (
 
 	// PatchesAppliedAnnotation indicates the operator has applied patches
 	PatchesAppliedAnnotation = "preview.homelab.io/patches-applied"
+
+	// InfraCreatedAnnotation indicates infrastructure resources (CNPG, Redis, etc.) have been created
+	InfraCreatedAnnotation = "preview.homelab.io/infra-created"
+
+	// CredentialsPatchedAnnotation indicates DB credentials have been injected into patches
+	CredentialsPatchedAnnotation = "preview.homelab.io/credentials-patched"
 )
 
 // KustomizationReconciler watches Flux Kustomizations with preview labels
@@ -89,15 +95,40 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// State 2: Patches applied, Kustomization running → create infrastructure
 	annotations := ks.GetAnnotations()
-	if annotations != nil && annotations[PatchesAppliedAnnotation] == "true" {
-		log.Info("Creating preview infrastructure", "app", appName)
-		if err := handler.CreateInfrastructure(ctx, &ks, appName); err != nil {
-			log.Error(err, "Failed to create preview infrastructure")
-			return ctrl.Result{RequeueAfter: 60 * time.Second}, err
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	// New flow: 3-state progression after patches are applied
+	if annotations[PatchesAppliedAnnotation] == "true" {
+		// State 2: Create infrastructure (CNPG, Redis, S3, etc.)
+		if annotations[InfraCreatedAnnotation] != "true" {
+			log.Info("Creating preview infrastructure", "app", appName)
+			if err := handler.CreateInfrastructure(ctx, &ks, appName); err != nil {
+				log.Error(err, "Failed to create preview infrastructure")
+				return ctrl.Result{RequeueAfter: 60 * time.Second}, err
+			}
+			annotations[InfraCreatedAnnotation] = "true"
+			ks.SetAnnotations(annotations)
+			if err := r.Update(ctx, &ks); err != nil {
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+			}
+			log.Info("Preview infrastructure created", "app", appName)
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
-		log.Info("Preview infrastructure ready", "app", appName)
+
+		// State 3: Update patches with DB credentials once CNPG is ready
+		if annotations[CredentialsPatchedAnnotation] != "true" {
+			if err := handler.UpdateDBCredentialPatches(ctx, &ks, appName); err != nil {
+				log.Info("Waiting for DB credentials to become available", "error", err)
+				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+			}
+			log.Info("Preview environment fully ready", "app", appName)
+			return ctrl.Result{}, nil
+		}
+
+		// All states complete
 		return ctrl.Result{}, nil
 	}
 
