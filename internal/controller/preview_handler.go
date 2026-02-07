@@ -115,8 +115,23 @@ func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomize
 	// Discover OIDC callback path from production
 	callbackPath := h.discoverOIDCCallbackPath(ctx, appName)
 
+	// Resolve DB credentials from CNPG superuser secret (if database is used)
+	var dbCreds *DBCredentials
+	if config.Spec.HelmValues != nil && (config.Spec.HelmValues.DatabaseUser != "" || config.Spec.HelmValues.DatabasePassword != "") {
+		secretName := fmt.Sprintf("postgres-preview-%s-superuser", prNumber)
+		secret := &corev1.Secret{}
+		if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, secret); err == nil {
+			dbCreds = &DBCredentials{
+				Username: string(secret.Data["username"]),
+				Password: string(secret.Data["password"]),
+			}
+		} else {
+			h.log.Info("CNPG superuser secret not found, DB credentials will be empty", "secret", secretName)
+		}
+	}
+
 	// Generate all patches
-	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath)
+	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, dbCreds)
 
 	// Apply patches to the Kustomization
 	ks.Spec.Patches = allPatches
@@ -907,8 +922,8 @@ func (h *PreviewHandler) patchHelmRelease(ctx context.Context, namespace, appNam
 		values = make(map[string]interface{})
 	}
 
-	// Build value patches
-	patches := h.buildHelmValuePatches(namespace, appName, prNumber, config)
+	// Build value patches (nil dbCreds — this legacy path doesn't resolve secrets)
+	patches := h.buildHelmValuePatches(namespace, appName, prNumber, config, nil)
 
 	// Apply patches
 	modified := false
@@ -1066,7 +1081,7 @@ func (h *PreviewHandler) buildEnvPatches(namespace, appName, prNumber string, co
 }
 
 // buildHelmValuePatches builds the map of Helm value patches based on config
-func (h *PreviewHandler) buildHelmValuePatches(namespace, appName, prNumber string, config *v1.PreviewConfig) map[string]string {
+func (h *PreviewHandler) buildHelmValuePatches(namespace, appName, prNumber string, config *v1.PreviewConfig, dbCreds *DBCredentials) map[string]string {
 	mapping := config.Spec.HelmValues
 	patches := make(map[string]string)
 
@@ -1087,8 +1102,14 @@ func (h *PreviewHandler) buildHelmValuePatches(namespace, appName, prNumber stri
 	if mapping.DatabaseName != "" {
 		patches[mapping.DatabaseName] = appName
 	}
-	// DatabaseUser and DatabasePassword are NOT set here — they come from
-	// valuesFrom referencing the CNPG superuser secret (see buildAllPatches).
+	if dbCreds != nil {
+		if mapping.DatabaseUser != "" {
+			patches[mapping.DatabaseUser] = dbCreds.Username
+		}
+		if mapping.DatabasePassword != "" {
+			patches[mapping.DatabasePassword] = dbCreds.Password
+		}
+	}
 
 	// Redis
 	if mapping.RedisHost != "" {

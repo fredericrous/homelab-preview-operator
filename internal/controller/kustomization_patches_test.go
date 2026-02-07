@@ -307,7 +307,7 @@ func TestBuildAllPatches(t *testing.T) {
 		},
 	}
 
-	patches := buildAllPatches("openwebui", "7", "preview-pr-7", "daddyshome.fr", config, "/oauth/oidc/callback")
+	patches := buildAllPatches("openwebui", "7", "preview-pr-7", "daddyshome.fr", config, "/oauth/oidc/callback", nil)
 
 	// Should have strip patches + deployment env patch
 	if len(patches) <= len(stripTargets) {
@@ -354,7 +354,7 @@ func TestBuildAllPatchesHelm(t *testing.T) {
 		},
 	}
 
-	patches := buildAllPatches("gitea", "7", "preview-pr-7", "daddyshome.fr", config, "/user/oauth2/Authelia/callback")
+	patches := buildAllPatches("gitea", "7", "preview-pr-7", "daddyshome.fr", config, "/user/oauth2/Authelia/callback", nil)
 
 	foundHelmPatch := false
 	for _, p := range patches {
@@ -368,6 +368,7 @@ func TestBuildAllPatchesHelm(t *testing.T) {
 }
 
 func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
+	dbCreds := &DBCredentials{Username: "postgres", Password: "s3cret-pw"}
 	config := &v1.PreviewConfig{
 		Spec: v1.PreviewConfigSpec{
 			DeploymentType: v1.DeploymentTypeHelm,
@@ -375,6 +376,7 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 			HelmValues: &v1.HelmValuesMapping{
 				DatabaseHost:     "externalDatabase.host",
 				DatabaseName:     "externalDatabase.database",
+				DatabaseUser:     "externalDatabase.user",
 				DatabasePassword: "externalDatabase.password",
 				AppURL:           "nextcloud.host",
 			},
@@ -386,10 +388,10 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 		},
 	}
 
-	patches := buildAllPatches("nextcloud", "8", "preview-pr-8", "daddyshome.fr", config, "/apps/user_oidc/code")
+	patches := buildAllPatches("nextcloud", "8", "preview-pr-8", "daddyshome.fr", config, "/apps/user_oidc/code", dbCreds)
 
-	// Should have strip patches + valuesFrom replace + helm value patch + postRenderer patch
-	foundValuesFromReplace := false
+	// Should have strip patches + valuesFrom strip + helm value patch + postRenderer patch
+	foundValuesFromStrip := false
 	foundHelmValues := false
 	foundPostRenderer := false
 	for _, p := range patches {
@@ -405,32 +407,30 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 				if !strings.Contains(p.Patch, "preview-oidc-client-secret-8") {
 					t.Error("postRenderer missing OIDC secret ref")
 				}
-				// Both containers should be patched
 				if !strings.Contains(p.Patch, "name: nextcloud-cron") {
 					t.Error("postRenderer missing nextcloud-cron container")
 				}
 				if strings.Count(p.Patch, "REDIS_HOST") != 2 {
 					t.Errorf("expected REDIS_HOST 2 times (one per container), got %d", strings.Count(p.Patch, "REDIS_HOST"))
 				}
-			} else if strings.Contains(p.Patch, "valuesFrom") {
-				foundValuesFromReplace = true
-				// Should reference CNPG superuser secret for DB password
-				if !strings.Contains(p.Patch, "postgres-preview-8-superuser") {
-					t.Error("valuesFrom missing CNPG superuser secret reference")
-				}
-				if !strings.Contains(p.Patch, "targetPath: externalDatabase.password") {
-					t.Error("valuesFrom missing password targetPath")
-				}
+			} else if strings.Contains(p.Patch, "valuesFrom: []") {
+				foundValuesFromStrip = true
 			} else {
 				foundHelmValues = true
 				if !strings.Contains(p.Patch, "externalDatabase") {
 					t.Error("helm values missing externalDatabase")
 				}
+				if !strings.Contains(p.Patch, "s3cret-pw") {
+					t.Error("helm values missing DB password")
+				}
+				if !strings.Contains(p.Patch, "postgres") {
+					t.Error("helm values missing DB username")
+				}
 			}
 		}
 	}
-	if !foundValuesFromReplace {
-		t.Error("missing valuesFrom replace patch")
+	if !foundValuesFromStrip {
+		t.Error("missing valuesFrom strip patch")
 	}
 	if !foundHelmValues {
 		t.Error("missing HelmRelease value patch")
@@ -440,61 +440,10 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 	}
 }
 
-func TestBuildAllPatchesHelmNoDbPassword(t *testing.T) {
-	// When no DB password is configured, valuesFrom should be empty
-	config := &v1.PreviewConfig{
-		Spec: v1.PreviewConfigSpec{
-			DeploymentType: v1.DeploymentTypeHelm,
-			HelmValues: &v1.HelmValuesMapping{
-				AppURL: "app.url",
-			},
-		},
-	}
-
-	patches := buildAllPatches("myapp", "1", "preview-pr-1", "daddyshome.fr", config, "/oauth/callback")
-
-	foundEmptyValuesFrom := false
-	for _, p := range patches {
-		if p.Target != nil && p.Target.Kind == "HelmRelease" && strings.Contains(p.Patch, "valuesFrom: []") {
-			foundEmptyValuesFrom = true
-		}
-	}
-	if !foundEmptyValuesFrom {
-		t.Error("expected empty valuesFrom when no DB password configured")
-	}
-}
-
-func TestGenerateHelmValuesRemovePatch(t *testing.T) {
-	patch := generateHelmValuesRemovePatch("gitea", []string{
-		"gitea.config.database.USER",
-		"gitea.config.database.PASSWD",
-	})
-	if patch == nil {
-		t.Fatal("expected non-nil patch")
-	}
-
-	if !strings.Contains(patch.Patch, "op: remove") {
-		t.Error("patch missing op: remove")
-	}
-	if !strings.Contains(patch.Patch, "/spec/values/gitea/config/database/USER") {
-		t.Error("patch missing USER path")
-	}
-	if !strings.Contains(patch.Patch, "/spec/values/gitea/config/database/PASSWD") {
-		t.Error("patch missing PASSWD path")
-	}
-}
-
-func TestGenerateHelmValuesRemovePatchEmpty(t *testing.T) {
-	patch := generateHelmValuesRemovePatch("app", nil)
-	if patch != nil {
-		t.Error("expected nil for empty paths")
-	}
-}
-
 func TestBuildAllPatchesNoConfig(t *testing.T) {
 	config := &v1.PreviewConfig{}
 
-	patches := buildAllPatches("myapp", "1", "preview-pr-1", "daddyshome.fr", config, "/oauth/callback")
+	patches := buildAllPatches("myapp", "1", "preview-pr-1", "daddyshome.fr", config, "/oauth/callback", nil)
 
 	// Should only have strip patches
 	if len(patches) != len(stripTargets) {
