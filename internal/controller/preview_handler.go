@@ -538,8 +538,8 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 		"instances": int64(1),
 		"imageName": "ghcr.io/cloudnative-pg/postgresql:17",
 		"inheritedMetadata": map[string]interface{}{
-			"annotations": map[string]interface{}{
-				"ambient.istio.io/redirection": "disabled",
+			"labels": map[string]interface{}{
+				"istio.io/dataplane-mode": "none",
 			},
 		},
 		"bootstrap": map[string]interface{}{
@@ -1086,6 +1086,14 @@ func (h *PreviewHandler) buildHelmValuePatches(namespace, appName, prNumber stri
 	}
 	if mapping.DatabaseName != "" {
 		patches[mapping.DatabaseName] = appName
+	}
+	if mapping.DatabaseUser != "" {
+		patches[mapping.DatabaseUser] = "postgres"
+	}
+	if mapping.DatabasePassword != "" {
+		// Set to empty — the actual password is injected via env var override
+		// (postRenderer) referencing the CNPG superuser secret
+		patches[mapping.DatabasePassword] = ""
 	}
 
 	// Redis

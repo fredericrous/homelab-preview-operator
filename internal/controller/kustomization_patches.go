@@ -129,6 +129,27 @@ func buildEnvVarFromYAML(ep EnvPatch) string {
 	)
 }
 
+// generateValuesFromStripPatch creates a strategic merge patch that empties valuesFrom
+// on a HelmRelease. In preview, ExternalSecrets are stripped, so secrets referenced by
+// valuesFrom won't exist. Env var overrides (via postRenderers) handle the values instead.
+func generateValuesFromStripPatch(appName string) *kustomize.Patch {
+	patch := fmt.Sprintf(`apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: %s
+spec:
+  valuesFrom: []`, appName)
+
+	return &kustomize.Patch{
+		Target: &kustomize.Selector{
+			Group: "helm.toolkit.fluxcd.io",
+			Kind:  "HelmRelease",
+			Name:  appName,
+		},
+		Patch: patch,
+	}
+}
+
 // generateHelmValuePatches creates a strategic merge patch for a HelmRelease.
 // Only supports simple dot-notation paths. For env var overrides, use
 // generatePostRendererPatch instead.
@@ -263,6 +284,11 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 	switch config.Spec.DeploymentType {
 	case v1.DeploymentTypeHelm:
 		h := &PreviewHandler{previewDomain: previewDomain}
+
+		// Strip valuesFrom — ExternalSecrets are removed in preview, so
+		// secrets referenced by valuesFrom won't exist. Values are handled
+		// via Helm value patches and env var overrides instead.
+		allPatches = append(allPatches, *generateValuesFromStripPatch(appName))
 
 		// Helm value patches (simple dot-paths for HelmRelease spec.values)
 		if config.Spec.HelmValues != nil {
