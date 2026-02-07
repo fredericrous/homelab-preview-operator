@@ -1180,8 +1180,15 @@ func (h *PreviewHandler) buildHelmValuePatches(namespace, appName, prNumber stri
 		patches[mapping.S3Bucket] = appName
 	}
 
-	// Extra values (arbitrary overrides)
+	// Extra values (arbitrary overrides with variable substitution)
+	redisHost := fmt.Sprintf("redis-preview.%s.svc.cluster.local", namespace)
+	dbHost := fmt.Sprintf("postgres-preview-%s-rw.%s.svc.cluster.local", prNumber, namespace)
 	for k, v := range mapping.ExtraValues {
+		v = strings.ReplaceAll(v, "{REDIS_HOST}", redisHost)
+		v = strings.ReplaceAll(v, "{DB_HOST}", dbHost)
+		v = strings.ReplaceAll(v, "{NAMESPACE}", namespace)
+		v = strings.ReplaceAll(v, "{PR_NUMBER}", prNumber)
+		v = strings.ReplaceAll(v, "{APP_NAME}", appName)
 		patches[k] = v
 	}
 

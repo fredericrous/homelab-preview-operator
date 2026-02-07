@@ -128,7 +128,18 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, nil
 		}
 
-		// All states complete
+		// All states complete — verify patches are still present (ResourceSet may overwrite)
+		if len(ks.Spec.Patches) == 0 {
+			log.Info("Patches were cleared (likely by ResourceSet), re-applying", "app", appName)
+			delete(annotations, CredentialsPatchedAnnotation)
+			delete(annotations, PatchesAppliedAnnotation)
+			ks.SetAnnotations(annotations)
+			ks.Spec.Suspend = true
+			if err := r.Update(ctx, &ks); err != nil {
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
