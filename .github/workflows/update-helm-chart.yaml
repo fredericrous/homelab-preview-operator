@@ -7,16 +7,6 @@ on:
         description: 'Version to update (without v prefix)'
         required: true
         type: string
-      bump_chart_version:
-        description: 'Bump chart version'
-        required: false
-        type: boolean
-        default: true
-      version_bump_type:
-        description: 'Version bump type (auto, major, minor, patch)'
-        required: false
-        type: string
-        default: 'auto'
 
 jobs:
   update-chart:
@@ -38,10 +28,10 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
-      - name: Checkout operator repository
+      - name: Checkout source repository
         uses: actions/checkout@v4
         with:
-          path: operator
+          path: source
 
       - name: Checkout charts repository
         uses: actions/checkout@v4
@@ -50,21 +40,32 @@ jobs:
           token: ${{ secrets.CHARTS_REPO_TOKEN }}
           path: charts
 
-      - name: Sync CRDs and RBAC from operator
+      - name: Sync chart from source to charts repo
         run: |
           CHART_NAME="${{ github.event.repository.name }}"
           CHART_DIR="charts/charts/${CHART_NAME}"
 
-          # Sync CRDs
-          if [ -d "operator/config/crd/bases" ]; then
-            echo "Syncing CRDs from operator to chart..."
+          # Create chart directory if it doesn't exist
+          mkdir -p "${CHART_DIR}"
+
+          # Sync entire chart (templates, values, helpers, crds)
+          cp -rv source/chart/${CHART_NAME}/* "${CHART_DIR}/"
+
+      - name: Sync CRDs and RBAC from kubebuilder
+        run: |
+          CHART_NAME="${{ github.event.repository.name }}"
+          CHART_DIR="charts/charts/${CHART_NAME}"
+
+          # Sync CRDs from kubebuilder output
+          if [ -d "source/config/crd/bases" ]; then
+            echo "Syncing CRDs from kubebuilder output..."
             mkdir -p "${CHART_DIR}/crds"
-            cp -v operator/config/crd/bases/*.yaml "${CHART_DIR}/crds/"
+            cp -v source/config/crd/bases/*.yaml "${CHART_DIR}/crds/"
           fi
 
-          # Sync ClusterRole from operator RBAC
-          if [ -f "operator/config/rbac/role.yaml" ]; then
-            echo "Generating ClusterRole template from operator RBAC..."
+          # Generate ClusterRole template from kubebuilder RBAC
+          if [ -f "source/config/rbac/role.yaml" ]; then
+            echo "Generating ClusterRole template from kubebuilder RBAC..."
             cat > "${CHART_DIR}/templates/clusterrole.yaml" << EOF
           apiVersion: rbac.authorization.k8s.io/v1
           kind: ClusterRole
@@ -74,7 +75,7 @@ jobs:
               {{- include "${CHART_NAME}.labels" . | nindent 4 }}
           EOF
             echo "rules:" >> "${CHART_DIR}/templates/clusterrole.yaml"
-            yq '.rules' operator/config/rbac/role.yaml | sed 's/^/  /' >> "${CHART_DIR}/templates/clusterrole.yaml"
+            yq '.rules' source/config/rbac/role.yaml | sed 's/^/  /' >> "${CHART_DIR}/templates/clusterrole.yaml"
           fi
 
           cd charts
@@ -135,7 +136,8 @@ jobs:
                 fi
               done < "$README_FILE" > "$README_FILE.tmp" && mv "$README_FILE.tmp" "$README_FILE"
             else
-              echo "Chart not found in README.md - manual intervention may be required"
+              echo "Adding new chart entry to README.md"
+              sed -i "/^| \[/a | [${CHART_NAME}](charts/${CHART_NAME}/) | ${CHART_VERSION} | ${APP_VERSION} | ${CHART_DESCRIPTION} |" "$README_FILE" 2>/dev/null || true
             fi
           fi
 
@@ -157,9 +159,7 @@ jobs:
             - **Version**: `${{ steps.update-chart.outputs.chart_version }}` (chart and app synced)
 
             ### Files Updated
-            - `charts/${{ steps.update-chart.outputs.chart_name }}/Chart.yaml` - Updated appVersion and chart version
-            - `charts/${{ steps.update-chart.outputs.chart_name }}/crds/*.yaml` - Synced CRDs from operator
-            - `charts/${{ steps.update-chart.outputs.chart_name }}/templates/clusterrole.yaml` - Synced RBAC rules from operator
+            - `charts/${{ steps.update-chart.outputs.chart_name }}/` - Synced chart from source repository
             - `README.md` - Updated chart version and app version in charts table
 
             ### What's Changed
@@ -167,13 +167,12 @@ jobs:
             See [release notes](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.version }}) for details.
 
             ---
-            *This PR was automatically generated when [operator version ${{ steps.version.outputs.version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.version }}) was released.*
+            *This PR was automatically generated when [version ${{ steps.version.outputs.version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.version }}) was released.*
           branch: update-${{ steps.update-chart.outputs.chart_name }}-${{ steps.version.outputs.version }}
           base: main
           labels: |
             chart-update
             automated
-            operator-release
 
       - name: Add PR comment with testing instructions
         if: steps.create-pr.outputs.pull-request-number

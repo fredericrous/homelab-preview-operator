@@ -139,8 +139,7 @@ jobs:
           VERSION="${{ steps.release_notes.outputs.VERSION_IMG }}"
           echo "Triggering Helm chart update for version ${VERSION}..."
           gh workflow run update-helm-chart.yaml \
-            --field version="${VERSION}" \
-            --field bump_chart_version=true
+            --field version="${VERSION}"
           echo "Successfully triggered Helm chart update for version ${VERSION}"
 
   security-scan:
