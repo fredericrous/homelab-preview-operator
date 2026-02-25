@@ -131,6 +131,26 @@ jobs:
           prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
           generate_release_notes: true
 
+      - name: Bump Chart.yaml in source repo
+        run: |
+          VERSION="${{ steps.release_notes.outputs.VERSION_IMG }}"
+          REPO_NAME=$(basename "${{ github.repository }}")
+          CHART_PATH="chart/${REPO_NAME}/Chart.yaml"
+
+          CURRENT=$(grep '^version:' "$CHART_PATH" | awk '{print $2}')
+          if [ "$CURRENT" != "$VERSION" ]; then
+            sed -i "s/^version: .*/version: $VERSION/" "$CHART_PATH"
+            sed -i "s/^appVersion: .*/appVersion: $VERSION/" "$CHART_PATH"
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$CHART_PATH"
+            git commit -m "chore: bump chart to $VERSION [skip ci]"
+            git push origin HEAD:main
+          else
+            echo "Chart.yaml already at $VERSION, skipping"
+          fi
+
       - name: Trigger Helm Chart Update
         if: success()
         env:
