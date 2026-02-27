@@ -2,8 +2,8 @@ apiVersion: v2
 name: homelab-preview-operator
 description: A Kubernetes operator that automatically configures preview environments for applications
 type: application
-version: 0.5.13
-appVersion: "0.5.13"
+version: 0.5.14
+appVersion: 0.5.14
 kubeVersion: ">=1.28.0-0"
 home: https://github.com/fredericrous/homelab-preview-operator
 sources:
