@@ -35,6 +35,7 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var previewDomain string
+	var githubRepo string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -42,6 +43,7 @@ func main() {
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.StringVar(&previewDomain, "preview-domain", "daddyshome.fr", "The domain for preview URLs.")
+	flag.StringVar(&githubRepo, "github-repo", "fredericrous/homelab", "The GitHub repository (owner/repo) for posting PR comments.")
 
 	opts := zap.Options{
 		Development: true,
@@ -67,6 +69,7 @@ func main() {
 		Log:           ctrl.Log.WithName("controllers").WithName("Kustomization"),
 		Scheme:        mgr.GetScheme(),
 		PreviewDomain: previewDomain,
+		GitHubRepo:    githubRepo,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Kustomization")
 		os.Exit(1)

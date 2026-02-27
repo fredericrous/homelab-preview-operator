@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -30,6 +32,9 @@ const (
 
 	// CredentialsPatchedAnnotation indicates DB credentials have been injected into patches
 	CredentialsPatchedAnnotation = "preview.homelab.io/credentials-patched"
+
+	// PRCommentedAnnotation indicates a PR comment with the preview URL has been posted
+	PRCommentedAnnotation = "preview.homelab.io/pr-commented"
 )
 
 // KustomizationReconciler watches Flux Kustomizations with preview labels
@@ -38,6 +43,7 @@ type KustomizationReconciler struct {
 	Log           logr.Logger
 	Scheme        *runtime.Scheme
 	PreviewDomain string
+	GitHubRepo    string
 }
 
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch;update;patch
@@ -126,6 +132,21 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			log.Info("Preview environment fully ready", "app", appName)
 			return ctrl.Result{}, nil
+		}
+
+		// Post a PR comment with the preview URL (once, non-blocking)
+		if annotations[PRCommentedAnnotation] != "true" && r.GitHubRepo != "" {
+			prNumber := strings.TrimPrefix(ks.Namespace, "preview-pr-")
+			previewURL := fmt.Sprintf("https://pr-%s-%s.%s", prNumber, appName, r.PreviewDomain)
+			if err := PostPRComment(ctx, r.Client, ks.Namespace, r.GitHubRepo, prNumber, appName, previewURL, log); err != nil {
+				log.Error(err, "Failed to post PR comment", "pr", prNumber)
+			} else {
+				annotations[PRCommentedAnnotation] = "true"
+				ks.SetAnnotations(annotations)
+				if err := r.Update(ctx, &ks); err != nil {
+					log.Error(err, "Failed to save PR comment annotation")
+				}
+			}
 		}
 
 		// All states complete — verify patches are still present (ResourceSet may overwrite)
