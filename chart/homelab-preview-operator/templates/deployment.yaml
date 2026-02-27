@@ -35,6 +35,9 @@ spec:
             - --preview-domain={{ .Values.config.previewDomain }}
             - --leader-elect={{ .Values.config.leaderElect }}
             - --health-probe-bind-address=:{{ .Values.health.port }}
+            {{- if .Values.config.githubRepo }}
+            - --github-repo={{ .Values.config.githubRepo }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
