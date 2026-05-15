@@ -137,19 +137,42 @@ jobs:
           REPO_NAME=$(basename "${{ github.repository }}")
           CHART_PATH="chart/${REPO_NAME}/Chart.yaml"
 
-          CURRENT=$(grep '^version:' "$CHART_PATH" | awk '{print $2}')
-          if [ "$CURRENT" != "$VERSION" ]; then
+          # Switch from the tag's detached HEAD to main's tip and apply
+          # the version bump there. Retries on non-fast-forward push so
+          # a concurrent commit on main (another release, a docs PR
+          # merging) doesn't drop the chart bump. See kb-vision
+          # commit c857a53 for the incident that motivated this fix.
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git checkout -B main origin/main
+
+            CURRENT=$(grep '^version:' "$CHART_PATH" | awk '{print $2}')
+            if [ "$CURRENT" = "$VERSION" ]; then
+              echo "Chart.yaml already at $VERSION on main, nothing to do"
+              exit 0
+            fi
+
             sed -i "s/^version: .*/version: $VERSION/" "$CHART_PATH"
             sed -i "s/^appVersion: .*/appVersion: $VERSION/" "$CHART_PATH"
-
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
             git add "$CHART_PATH"
             git commit -m "chore: bump chart to $VERSION [skip ci]"
-            git push origin HEAD:main
-          else
-            echo "Chart.yaml already at $VERSION, skipping"
-          fi
+
+            if git push origin main; then
+              echo "Pushed chart bump on attempt $attempt"
+              exit 0
+            fi
+
+            echo "Push rejected on attempt $attempt — main moved. Re-fetching and retrying..."
+            sleep $((RANDOM % 5 + 1))
+          done
+
+          echo "::error::Could not push chart bump after 5 attempts — main is heavily contended"
+          exit 1
 
       - name: Trigger Helm Chart Update
         if: success()
