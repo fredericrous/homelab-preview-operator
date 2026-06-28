@@ -1,8 +1,22 @@
 # Design: real-data previews for SQLite apps (application-landscape)
 
-Status: **planned, not implemented.** Decided 2026-06-28 to do "preview support first"
-(wire the `preview` label flow for SQLite apps) and defer an automatic migration-check
-for them. This doc is the focused plan to pick up fresh.
+Status: **SHIPPED (operator 0.7.0/0.7.1), validated live 2026-06-28.** Decided to do "preview
+support first" (wire the `preview` label flow for SQLite apps) and defer an automatic
+migration-check for them. The plan below was implemented as described; what landed:
+
+- **0.7.0** — `spec.deploymentPatch.{removeContainers,removeInitContainers}` + `spec.envMapping.extraEnv`
+  (with `valueFrom: null` clearing so overrides beat stripped-secret `secretKeyRef`s). The config-volume
+  PVC clone was already present and is binary-safe for SQLite `*.db`.
+- **application-landscape `preview.yaml`** — clones the data PVC, in-ns S3 proxy, strips **both**
+  prod-bucket writers (`litestream` **and** `s3-prune` — the second was found during the supervised
+  test), repoints `GIT_S3_*` at the proxy, dummy Stripe/session/ws. Validated live: a fresh preview is
+  `web`+`yjs` only, 2/2 ready, serving `/pricing` against cloned data, zero prod writes.
+- **0.7.1** — fixed two bugs the work surfaced: (#2) config-volume + CNPG clone teardown leaked the
+  cluster-scoped VSCs (Retain) + prod VolumeSnapshots → added a `PreviewFinalizer` + `TeardownSnapshots`;
+  (#3) `patches-applied` rendered once → added a `config-hash` re-render (keeps `infra-created`, no
+  re-clone). Also set the operator HelmRelease `install/upgrade.crds: CreateReplace`. All validated live.
+
+Original plan retained below for context.
 
 ## Goal
 
