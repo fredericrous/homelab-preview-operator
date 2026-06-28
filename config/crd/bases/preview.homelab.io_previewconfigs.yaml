@@ -69,6 +69,26 @@ spec:
                 required:
                 - claimName
                 type: object
+              deploymentPatch:
+                description: |-
+                  DeploymentPatch removes containers/initContainers from the previewed
+                  Deployment — e.g. strip a backup sidecar (litestream) that would otherwise
+                  replicate the cloned data to a PRODUCTION bucket.
+                properties:
+                  removeContainers:
+                    description: |-
+                      RemoveContainers lists container names to delete from the Deployment in
+                      the preview (strategic-merge $patch: delete).
+                    items:
+                      type: string
+                    type: array
+                  removeInitContainers:
+                    description: RemoveInitContainers lists initContainer names to
+                      delete from the preview.
+                    items:
+                      type: string
+                    type: array
+                type: object
               deploymentType:
                 allOf:
                 - enum:
@@ -104,6 +124,17 @@ spec:
                     type: string
                   databaseUser:
                     type: string
+                  extraEnv:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      ExtraEnv sets arbitrary env vars on the patched containers, OVERRIDING any
+                      existing valueFrom (the patch clears valueFrom). Use to repoint a stripped
+                      secret's env at the preview S3 proxy or to dummy values so a preview pod
+                      boots without the production secrets (which are stripped). Values support
+                      {S3_ENDPOINT}, {S3_ACCESS_KEY}, {S3_SECRET_KEY}, {NAMESPACE}, {PR_NUMBER},
+                      {APP_NAME} substitution.
+                    type: object
                   oidcClientId:
                     description: OIDC configuration
                     type: string

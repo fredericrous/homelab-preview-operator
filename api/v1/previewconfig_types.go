@@ -55,6 +55,25 @@ type PreviewConfigSpec struct {
 	// ConfigVolume defines a config PVC to clone with automatic URL rewriting
 	// +optional
 	ConfigVolume *ConfigVolumeConfig `json:"configVolume,omitempty"`
+
+	// DeploymentPatch removes containers/initContainers from the previewed
+	// Deployment — e.g. strip a backup sidecar (litestream) that would otherwise
+	// replicate the cloned data to a PRODUCTION bucket.
+	// +optional
+	DeploymentPatch *DeploymentPatch `json:"deploymentPatch,omitempty"`
+}
+
+// DeploymentPatch strips containers from the previewed Deployment so a preview
+// can't run things that write to production (e.g. a backup sidecar).
+type DeploymentPatch struct {
+	// RemoveContainers lists container names to delete from the Deployment in
+	// the preview (strategic-merge $patch: delete).
+	// +optional
+	RemoveContainers []string `json:"removeContainers,omitempty"`
+
+	// RemoveInitContainers lists initContainer names to delete from the preview.
+	// +optional
+	RemoveInitContainers []string `json:"removeInitContainers,omitempty"`
 }
 
 // ConfigVolumeConfig defines a config PVC to clone for preview
@@ -149,6 +168,15 @@ type EnvMapping struct {
 	// App URL (for OIDC redirect, etc.)
 	// +optional
 	AppURL string `json:"appUrl,omitempty"`
+
+	// ExtraEnv sets arbitrary env vars on the patched containers, OVERRIDING any
+	// existing valueFrom (the patch clears valueFrom). Use to repoint a stripped
+	// secret's env at the preview S3 proxy or to dummy values so a preview pod
+	// boots without the production secrets (which are stripped). Values support
+	// {S3_ENDPOINT}, {S3_ACCESS_KEY}, {S3_SECRET_KEY}, {NAMESPACE}, {PR_NUMBER},
+	// {APP_NAME} substitution.
+	// +optional
+	ExtraEnv map[string]string `json:"extraEnv,omitempty"`
 }
 
 // HelmValuesMapping defines value paths for HelmRelease patching
