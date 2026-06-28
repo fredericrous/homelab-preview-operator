@@ -939,6 +939,26 @@ func (h *PreviewHandler) buildEnvPatches(namespace, appName, prNumber string, co
 		})
 	}
 
+	// Arbitrary extra env overrides (repoint stripped-secret env at the preview
+	// S3 proxy, or set dummy values). These override any existing valueFrom; the
+	// patch renderer clears valueFrom for plain-value entries.
+	if len(mapping.ExtraEnv) != 0 {
+		s3Endpoint := fmt.Sprintf("http://s3proxy.%s.svc.cluster.local:8080", namespace)
+		s3AccessKey := fmt.Sprintf("preview-%s", prNumber)
+		s3SecretKey := fmt.Sprintf("preview-secret-%s", prNumber)
+		repl := strings.NewReplacer(
+			"{S3_ENDPOINT}", s3Endpoint,
+			"{S3_ACCESS_KEY}", s3AccessKey,
+			"{S3_SECRET_KEY}", s3SecretKey,
+			"{NAMESPACE}", namespace,
+			"{PR_NUMBER}", prNumber,
+			"{APP_NAME}", appName,
+		)
+		for k, v := range mapping.ExtraEnv {
+			patches = append(patches, EnvPatch{Name: k, Value: repl.Replace(v)})
+		}
+	}
+
 	return patches
 }
 

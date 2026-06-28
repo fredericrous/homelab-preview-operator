@@ -488,3 +488,61 @@ func TestIndentYAML(t *testing.T) {
 		t.Errorf("indentYAML mismatch:\ngot:  %q\nwant: %q", result, expected)
 	}
 }
+
+func TestGenerateContainerStripPatch(t *testing.T) {
+	if generateContainerStripPatch("app", nil, nil) != nil {
+		t.Error("expected nil patch when nothing to remove")
+	}
+	p := generateContainerStripPatch("application-landscape", []string{"litestream"}, []string{"ensure-litestream-bucket"})
+	if p == nil {
+		t.Fatal("expected a patch")
+	}
+	if p.Target == nil || p.Target.Kind != "Deployment" || p.Target.Name != "application-landscape" {
+		t.Errorf("unexpected target: %+v", p.Target)
+	}
+	for _, want := range []string{"name: litestream", "name: ensure-litestream-bucket", "$patch: delete", "containers:", "initContainers:"} {
+		if !strings.Contains(p.Patch, want) {
+			t.Errorf("patch missing %q:\n%s", want, p.Patch)
+		}
+	}
+}
+
+func TestExtraEnvOverridesValueFrom(t *testing.T) {
+	cfg := &v1.PreviewConfig{
+		Spec: v1.PreviewConfigSpec{
+			DeploymentType: v1.DeploymentTypeDeployment,
+			DeploymentPatch: &v1.DeploymentPatch{
+				RemoveContainers:     []string{"litestream"},
+				RemoveInitContainers: []string{"ensure-litestream-bucket"},
+			},
+			EnvMapping: &v1.EnvMapping{
+				ContainerNames: []string{"web", "yjs"},
+				ExtraEnv: map[string]string{
+					"GIT_S3_ENDPOINT":   "{S3_ENDPOINT}",
+					"GIT_S3_ACCESS_KEY": "{S3_ACCESS_KEY}",
+					"STRIPE_SECRET_KEY": "sk_test_dummy",
+				},
+			},
+		},
+	}
+	patches := buildAllPatches("application-landscape", "9", "preview-pr-9", "daddyshome.fr", cfg, "", nil)
+	all := ""
+	for _, p := range patches {
+		all += p.Patch + "\n---\n"
+	}
+	// container strip present
+	if !strings.Contains(all, "name: litestream") || !strings.Contains(all, "$patch: delete") {
+		t.Error("expected litestream strip patch")
+	}
+	// extra env overrides clear valueFrom and substitute the proxy endpoint/creds
+	for _, want := range []string{
+		`value: "http://s3proxy.preview-pr-9.svc.cluster.local:8080"`,
+		`value: "preview-9"`, // {S3_ACCESS_KEY}
+		`value: "sk_test_dummy"`,
+		"valueFrom: null", // clears the stripped-secret valueFrom
+	} {
+		if !strings.Contains(all, want) {
+			t.Errorf("expected %q in patches:\n%s", want, all)
+		}
+	}
+}

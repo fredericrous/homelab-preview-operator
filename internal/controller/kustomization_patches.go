@@ -81,8 +81,10 @@ func generateDeploymentEnvPatches(appName string, containerNames []string, envPa
 		if ep.ValueFrom != nil {
 			envLines = append(envLines, buildEnvVarFromYAML(ep))
 		} else {
+			// valueFrom: null clears any existing valueFrom (e.g. a secretKeyRef
+			// to a stripped ExternalSecret) so a plain override wins cleanly.
 			envLines = append(envLines, fmt.Sprintf(
-				"                          - name: %s\n                            value: %q",
+				"                          - name: %s\n                            value: %q\n                            valueFrom: null",
 				ep.Name, ep.Value,
 			))
 		}
@@ -222,7 +224,7 @@ func generatePostRendererPatch(appName string, containerNames []string, envPatch
 				ep.Name, ep.ValueFrom.SecretKeyRef.Name, ep.ValueFrom.SecretKeyRef.Key))
 		} else {
 			envLines = append(envLines, fmt.Sprintf(
-				"            - name: %s\n              value: %q", ep.Name, ep.Value))
+				"            - name: %s\n              value: %q\n              valueFrom: null", ep.Name, ep.Value))
 		}
 	}
 	envBlock := strings.Join(envLines, "\n")
@@ -281,6 +283,34 @@ func indentYAML(s string, spaces int) string {
 	return strings.Join(lines, "\n")
 }
 
+// generateContainerStripPatch deletes named containers / initContainers from the
+// previewed Deployment via strategic-merge `$patch: delete`. Used to remove a
+// backup sidecar (e.g. litestream) so a preview can't replicate cloned data to a
+// production bucket.
+func generateContainerStripPatch(appName string, removeContainers, removeInitContainers []string) *kustomize.Patch {
+	if len(removeContainers) == 0 && len(removeInitContainers) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: %s\nspec:\n  template:\n    spec:\n", appName)
+	if len(removeContainers) > 0 {
+		b.WriteString("      containers:\n")
+		for _, c := range removeContainers {
+			fmt.Fprintf(&b, "        - name: %s\n          $patch: delete\n", c)
+		}
+	}
+	if len(removeInitContainers) > 0 {
+		b.WriteString("      initContainers:\n")
+		for _, c := range removeInitContainers {
+			fmt.Fprintf(&b, "        - name: %s\n          $patch: delete\n", c)
+		}
+	}
+	return &kustomize.Patch{
+		Target: &kustomize.Selector{Kind: "Deployment", Name: appName},
+		Patch:  b.String(),
+	}
+}
+
 // buildAllPatches combines all patch types for a preview Kustomization
 func buildAllPatches(appName, prNumber, namespace, previewDomain string, config *v1.PreviewConfig, callbackPath string, dbCreds *DBCredentials) []kustomize.Patch {
 	var allPatches []kustomize.Patch
@@ -331,6 +361,16 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 		}
 
 	default:
+		// Strip backup/sidecar containers (e.g. litestream) so the preview can't
+		// write the cloned data back to a production bucket.
+		if config.Spec.DeploymentPatch != nil {
+			if p := generateContainerStripPatch(appName,
+				config.Spec.DeploymentPatch.RemoveContainers,
+				config.Spec.DeploymentPatch.RemoveInitContainers); p != nil {
+				allPatches = append(allPatches, *p)
+			}
+		}
+
 		if config.Spec.EnvMapping != nil {
 			h := &PreviewHandler{previewDomain: previewDomain}
 			envPatches := h.buildEnvPatches(namespace, appName, prNumber, config)
