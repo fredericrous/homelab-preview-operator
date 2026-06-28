@@ -443,224 +443,26 @@ func (h *PreviewHandler) setupDatabase(ctx context.Context, namespace, appName, 
 
 	h.log.Info("App uses PostgreSQL, setting up CNPG cluster from snapshot", "cluster", clusterName, "clusterNamespace", clusterNamespace)
 
-	// --- Find the primary PVC name from the CNPG cluster ---
-	prodCluster := &unstructured.Unstructured{}
-	prodCluster.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster",
-	})
-	if err := h.client.Get(ctx, types.NamespacedName{
-		Namespace: clusterNamespace, Name: clusterName,
-	}, prodCluster); err != nil {
-		return fmt.Errorf("failed to get production CNPG cluster: %w", err)
-	}
-	primaryPod, _, _ := unstructured.NestedString(prodCluster.Object, "status", "currentPrimary")
-	if primaryPod == "" {
-		return fmt.Errorf("CNPG cluster %s has no currentPrimary", clusterName)
-	}
-	// CNPG PVC name = pod name
-	primaryPVC := primaryPod
-
-	// --- Create on-demand VolumeSnapshot in production namespace ---
-	snapshotClass := "ceph-block-snapshot"
-	prodSnapshotName := fmt.Sprintf("postgres-preview-pr-%s", prNumber)
-	h.log.Info("Creating database snapshot in production namespace", "namespace", clusterNamespace, "pvc", primaryPVC)
-
-	prodSnapshot := &unstructured.Unstructured{}
-	prodSnapshot.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "snapshot.storage.k8s.io",
-		Version: "v1",
-		Kind:    "VolumeSnapshot",
-	})
-	prodSnapshot.SetNamespace(clusterNamespace)
-	prodSnapshot.SetName(prodSnapshotName)
-	prodSnapshot.SetLabels(map[string]string{
-		"preview.homelab/pr":   prNumber,
-		"preview.homelab/type": "database",
-	})
-
-	prodVSSpec := map[string]interface{}{
-		"volumeSnapshotClassName": snapshotClass,
-		"source": map[string]interface{}{
-			"persistentVolumeClaimName": primaryPVC,
+	// Snapshot the production primary and bootstrap a CNPG clone from it.
+	// Names are PR-keyed (one preview per PR); see cloneCNPGFromSnapshot.
+	c := cnpgClone{
+		sourceCluster:    clusterName,
+		sourceClusterNS:  clusterNamespace,
+		targetNS:         namespace,
+		prodSnapshotName: fmt.Sprintf("postgres-preview-pr-%s", prNumber),
+		vscName:          fmt.Sprintf("postgres-preview-%s-content", prNumber),
+		vsName:           "postgres-preview-snapshot",
+		clusterName:      fmt.Sprintf("postgres-preview-%s", prNumber),
+		snapshotClass:    "ceph-block-snapshot",
+		labels: map[string]string{
+			"preview.homelab/pr":        prNumber,
+			"preview.homelab/namespace": namespace,
+			"preview.homelab/type":      "database",
 		},
 	}
-	if err := unstructured.SetNestedMap(prodSnapshot.Object, prodVSSpec, "spec"); err != nil {
-		return fmt.Errorf("failed to set production snapshot spec: %w", err)
-	}
-
-	if err := h.createOrUpdate(ctx, prodSnapshot); err != nil {
-		return fmt.Errorf("failed to create production VolumeSnapshot: %w", err)
-	}
-
-	// --- Wait for snapshot readiness ---
-	if err := h.waitForSnapshotReady(ctx, clusterNamespace, prodSnapshotName); err != nil {
-		return fmt.Errorf("production database snapshot not ready: %w", err)
-	}
-
-	// --- Read snapshot metadata (handle, driver, restoreSize) ---
-	prodSnapshot = &unstructured.Unstructured{}
-	prodSnapshot.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "snapshot.storage.k8s.io",
-		Version: "v1",
-		Kind:    "VolumeSnapshot",
-	})
-	if err := h.client.Get(ctx, types.NamespacedName{Namespace: clusterNamespace, Name: prodSnapshotName}, prodSnapshot); err != nil {
-		return fmt.Errorf("failed to re-read production snapshot: %w", err)
-	}
-
-	boundVSCName, _, _ := unstructured.NestedString(prodSnapshot.Object, "status", "boundVolumeSnapshotContentName")
-	if boundVSCName == "" {
-		return fmt.Errorf("production snapshot has no boundVolumeSnapshotContentName")
-	}
-
-	boundVSC := &unstructured.Unstructured{}
-	boundVSC.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "snapshot.storage.k8s.io",
-		Version: "v1",
-		Kind:    "VolumeSnapshotContent",
-	})
-	if err := h.client.Get(ctx, types.NamespacedName{Name: boundVSCName}, boundVSC); err != nil {
-		return fmt.Errorf("failed to get bound VolumeSnapshotContent: %w", err)
-	}
-
-	snapshotHandle, _, _ := unstructured.NestedString(boundVSC.Object, "status", "snapshotHandle")
-	if snapshotHandle == "" {
-		return fmt.Errorf("bound VolumeSnapshotContent has no snapshotHandle")
-	}
-	driver, _, _ := unstructured.NestedString(boundVSC.Object, "spec", "driver")
-
-	restoreSize, _, _ := unstructured.NestedString(prodSnapshot.Object, "status", "restoreSize")
-	if restoreSize == "" {
-		restoreSize = "10Gi"
-	}
-
-	h.log.Info("Got database snapshot metadata", "handle", snapshotHandle, "driver", driver, "restoreSize", restoreSize)
-
-	// --- Create pre-provisioned VolumeSnapshotContent + VolumeSnapshot in preview namespace ---
-	vscName := fmt.Sprintf("postgres-preview-%s-content", prNumber)
-	vsName := "postgres-preview-snapshot"
-
-	vsc := &unstructured.Unstructured{}
-	vsc.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "snapshot.storage.k8s.io",
-		Version: "v1",
-		Kind:    "VolumeSnapshotContent",
-	})
-	vsc.SetName(vscName)
-	vsc.SetLabels(map[string]string{
-		"preview.homelab/pr":        prNumber,
-		"preview.homelab/namespace": namespace,
-		"preview.homelab/type":      "database",
-	})
-
-	vscSpec := map[string]interface{}{
-		"driver":                  driver,
-		"deletionPolicy":          "Retain",
-		"source":                  map[string]interface{}{"snapshotHandle": snapshotHandle},
-		"volumeSnapshotClassName": snapshotClass,
-		"volumeSnapshotRef": map[string]interface{}{
-			"name":      vsName,
-			"namespace": namespace,
-		},
-	}
-	if err := unstructured.SetNestedMap(vsc.Object, vscSpec, "spec"); err != nil {
+	if err := h.cloneCNPGFromSnapshot(ctx, c); err != nil {
 		return err
 	}
-
-	if err := h.createOrUpdate(ctx, vsc); err != nil {
-		return fmt.Errorf("failed to create VolumeSnapshotContent: %w", err)
-	}
-
-	vs := &unstructured.Unstructured{}
-	vs.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "snapshot.storage.k8s.io",
-		Version: "v1",
-		Kind:    "VolumeSnapshot",
-	})
-	vs.SetNamespace(namespace)
-	vs.SetName(vsName)
-
-	previewVSSpec := map[string]interface{}{
-		"source": map[string]interface{}{
-			"volumeSnapshotContentName": vscName,
-		},
-	}
-	if err := unstructured.SetNestedMap(vs.Object, previewVSSpec, "spec"); err != nil {
-		return err
-	}
-
-	if err := h.createOrUpdate(ctx, vs); err != nil {
-		return fmt.Errorf("failed to create VolumeSnapshot: %w", err)
-	}
-
-	// Create CNPG Cluster
-	cnpgCluster := &unstructured.Unstructured{}
-	cnpgCluster.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "postgresql.cnpg.io",
-		Version: "v1",
-		Kind:    "Cluster",
-	})
-	cnpgCluster.SetNamespace(namespace)
-	cnpgCluster.SetName(fmt.Sprintf("postgres-preview-%s", prNumber))
-
-	// Parse restore size (default to 10Gi)
-	storageSize := "10Gi"
-	if restoreSize != "" {
-		storageSize = restoreSize
-	}
-
-	cnpgSpec := map[string]interface{}{
-		"instances": int64(1),
-		"imageName": "ghcr.io/cloudnative-pg/postgresql:17",
-		"inheritedMetadata": map[string]interface{}{
-			"labels": map[string]interface{}{
-				"istio.io/dataplane-mode": "none",
-			},
-		},
-		"bootstrap": map[string]interface{}{
-			"recovery": map[string]interface{}{
-				"volumeSnapshots": map[string]interface{}{
-					"storage": map[string]interface{}{
-						"name":     vsName,
-						"kind":     "VolumeSnapshot",
-						"apiGroup": "snapshot.storage.k8s.io",
-					},
-				},
-			},
-		},
-		"postgresql": map[string]interface{}{
-			"shared_preload_libraries": []interface{}{"pg_stat_statements"},
-			"parameters": map[string]interface{}{
-				"shared_buffers":  "128MB",
-				"max_connections": "50",
-			},
-		},
-		"storage": map[string]interface{}{
-			"size":         storageSize,
-			"storageClass": "rook-ceph-block",
-		},
-		"resources": map[string]interface{}{
-			"requests": map[string]interface{}{
-				"memory": "256Mi",
-				"cpu":    "100m",
-			},
-			"limits": map[string]interface{}{
-				"memory": "512Mi",
-				"cpu":    "500m",
-			},
-		},
-		"enableSuperuserAccess": true,
-	}
-
-	if err := unstructured.SetNestedMap(cnpgCluster.Object, cnpgSpec, "spec"); err != nil {
-		return err
-	}
-
-	if err := h.createOrUpdate(ctx, cnpgCluster); err != nil {
-		return fmt.Errorf("failed to create CNPG Cluster: %w", err)
-	}
-
-	h.log.Info("Created CNPG Cluster from snapshot", "name", cnpgCluster.GetName())
 	return nil
 }
 

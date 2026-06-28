@@ -75,6 +75,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = (&controller.MigrationCheckReconciler{
+		Client: mgr.GetClient(),
+		Log:    ctrl.Log.WithName("controllers").WithName("MigrationCheck"),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "MigrationCheck")
+		os.Exit(1)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)

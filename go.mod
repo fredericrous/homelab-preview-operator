@@ -1,16 +1,16 @@
 module github.com/fredericrous/homelab-preview-operator
 
-go 1.23
+go 1.25.11
 
 require (
 	github.com/fluxcd/kustomize-controller/api v1.4.0
+	github.com/fluxcd/pkg/apis/kustomize v1.6.1
 	github.com/fluxcd/source-controller/api v1.4.1
 	github.com/go-logr/logr v1.4.2
 	k8s.io/api v0.31.1
 	k8s.io/apimachinery v0.31.1
 	k8s.io/client-go v0.31.1
 	sigs.k8s.io/controller-runtime v0.19.0
-	sigs.k8s.io/yaml v1.4.0
 )
 
 require (
@@ -20,7 +20,6 @@ require (
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.0 // indirect
 	github.com/fluxcd/pkg/apis/acl v0.3.0 // indirect
-	github.com/fluxcd/pkg/apis/kustomize v1.6.1 // indirect
 	github.com/fluxcd/pkg/apis/meta v1.6.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.7.0 // indirect
@@ -52,11 +51,11 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.26.0 // indirect
 	golang.org/x/exp v0.0.0-20230515195305-f3d0a9c9a5cc // indirect
-	golang.org/x/net v0.29.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.21.0 // indirect
-	golang.org/x/sys v0.25.0 // indirect
-	golang.org/x/term v0.24.0 // indirect
-	golang.org/x/text v0.18.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
@@ -69,4 +68,5 @@ require (
 	k8s.io/utils v0.0.0-20240711033017-18e509b52bc8 // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
+	sigs.k8s.io/yaml v1.4.0 // indirect
 )
