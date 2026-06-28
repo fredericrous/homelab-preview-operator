@@ -8,7 +8,6 @@ rules:
   - ""
   resources:
   - configmaps
-  - namespaces
   - secrets
   - services
   verbs:
@@ -21,6 +20,15 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - endpoints
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
   - persistentvolumeclaims
   verbs:
   - create
@@ -72,6 +80,32 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - preview.homelab.io
+  resources:
+  - migrationchecks
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - preview.homelab.io
+  resources:
+  - migrationchecks/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - preview.homelab.io
+  resources:
+  - migrationchecks/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - preview.homelab.io
   resources:
