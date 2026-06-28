@@ -52,6 +52,13 @@ func (h *PreviewHandler) cloneCNPGFromSnapshot(ctx context.Context, c cnpgClone)
 	// restored data dir is read by a compatible binary.
 	sourceImage, _, _ := unstructured.NestedString(prodCluster.Object, "spec", "imageName")
 	sourceCatalogRef, _, _ := unstructured.NestedMap(prodCluster.Object, "spec", "imageCatalogRef")
+	// Match the source storage class — restoring an encrypted Ceph snapshot into a
+	// volume of a different (e.g. unencrypted) class fails: "cannot create
+	// unencrypted volume from encrypted volume".
+	sourceStorageClass, _, _ := unstructured.NestedString(prodCluster.Object, "spec", "storage", "storageClass")
+	if sourceStorageClass == "" {
+		sourceStorageClass = "rook-ceph-block"
+	}
 
 	// --- Create on-demand VolumeSnapshot in the source (postgres) namespace ---
 	prodSnapshot := newVolumeSnapshot(c.sourceClusterNS, c.prodSnapshotName, c.labels)
@@ -142,7 +149,7 @@ func (h *PreviewHandler) cloneCNPGFromSnapshot(ctx context.Context, c cnpgClone)
 			"shared_preload_libraries": []interface{}{"pg_stat_statements"},
 			"parameters":               map[string]interface{}{"shared_buffers": "128MB", "max_connections": "50"},
 		},
-		"storage": map[string]interface{}{"size": restoreSize, "storageClass": "rook-ceph-block"},
+		"storage": map[string]interface{}{"size": restoreSize, "storageClass": sourceStorageClass},
 		"resources": map[string]interface{}{
 			"requests": map[string]interface{}{"memory": "256Mi", "cpu": "100m"},
 			"limits":   map[string]interface{}{"memory": "512Mi", "cpu": "500m"},
