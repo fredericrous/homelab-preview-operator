@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -128,6 +130,9 @@ func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomize
 		annotations = make(map[string]string)
 	}
 	annotations[PatchesAppliedAnnotation] = "true"
+	if hash := hashPreviewConfigSpec(config); hash != "" {
+		annotations[ConfigHashAnnotation] = hash
+	}
 	ks.SetAnnotations(annotations)
 
 	// Unsuspend the Kustomization
@@ -1204,4 +1209,87 @@ func strPtr(s string) *string {
 
 func int64Ptr(i int64) *int64 {
 	return &i
+}
+
+// hashPreviewConfigSpec returns a stable hash of the PreviewConfig spec, used to
+// detect config edits so an in-flight preview can be re-rendered.
+func hashPreviewConfigSpec(config *v1.PreviewConfig) string {
+	if config == nil {
+		return ""
+	}
+	b, err := json.Marshal(config.Spec)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// PreviewConfigHash fetches the app's PreviewConfig and returns its spec hash.
+// A missing PreviewConfig hashes as the empty spec (consistent with prepare).
+func (h *PreviewHandler) PreviewConfigHash(ctx context.Context, namespace, appName string) (string, error) {
+	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			config = &v1.PreviewConfig{}
+		} else {
+			return "", err
+		}
+	}
+	return hashPreviewConfigSpec(config), nil
+}
+
+// TeardownSnapshots deletes the cluster-scoped VolumeSnapshotContents (created
+// with deletionPolicy: Retain for the cross-namespace restore) and the prod-
+// namespace VolumeSnapshots that the config-volume and CNPG clone paths create.
+// Namespace deletion can't GC these, so without this they leak orphaned Ceph
+// snapshots. Deletes are best-effort and idempotent (NotFound is ignored); the
+// prod VolumeSnapshot's own (Delete-policy) content reaps the underlying snapshot.
+func (h *PreviewHandler) TeardownSnapshots(ctx context.Context, appName, prNumber string) error {
+	deleteByGVK := func(kind, namespace, name string) error {
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "snapshot.storage.k8s.io",
+			Version: "v1",
+			Kind:    kind,
+		})
+		if namespace != "" {
+			obj.SetNamespace(namespace)
+		}
+		obj.SetName(name)
+		if err := h.client.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("delete %s %s/%s: %w", kind, namespace, name, err)
+		}
+		return nil
+	}
+
+	// Cluster-scoped VolumeSnapshotContents (Retain) — config-volume + CNPG.
+	for _, name := range []string{
+		fmt.Sprintf("config-preview-%s-pr-%s-content", appName, prNumber),
+		fmt.Sprintf("postgres-preview-%s-content", prNumber),
+	} {
+		if err := deleteByGVK("VolumeSnapshotContent", "", name); err != nil {
+			return err
+		}
+	}
+
+	// Prod-namespace VolumeSnapshots. The config-volume snapshot lives in the app
+	// namespace; the CNPG snapshot lives in the cluster namespace (annotation,
+	// default "postgres").
+	if err := deleteByGVK("VolumeSnapshot", appName, fmt.Sprintf("config-preview-pr-%s", prNumber)); err != nil {
+		return err
+	}
+	var prodNS corev1.Namespace
+	if err := h.client.Get(ctx, types.NamespacedName{Name: appName}, &prodNS); err == nil {
+		if prodNS.Annotations["postgres.cnpg.io/cluster-name"] != "" {
+			cns := prodNS.Annotations["postgres.cnpg.io/cluster-namespace"]
+			if cns == "" {
+				cns = "postgres"
+			}
+			if err := deleteByGVK("VolumeSnapshot", cns, fmt.Sprintf("postgres-preview-pr-%s", prNumber)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

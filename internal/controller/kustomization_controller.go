@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
@@ -35,6 +36,16 @@ const (
 
 	// PRCommentedAnnotation indicates a PR comment with the preview URL has been posted
 	PRCommentedAnnotation = "preview.homelab.io/pr-commented"
+
+	// ConfigHashAnnotation records the PreviewConfig spec hash the patches were
+	// rendered from. A changed PreviewConfig (different hash) triggers a re-render
+	// so in-flight previews pick up config edits (e.g. an added removeContainers).
+	ConfigHashAnnotation = "preview.homelab.io/config-hash"
+
+	// PreviewFinalizer ensures the cluster-scoped VolumeSnapshotContents (Retain)
+	// and prod-namespace VolumeSnapshots created for clones are deleted on teardown
+	// — namespace deletion can't GC them, so they'd leak orphaned Ceph snapshots.
+	PreviewFinalizer = "preview.homelab.io/cleanup"
 )
 
 // KustomizationReconciler watches Flux Kustomizations with preview labels
@@ -89,6 +100,32 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	handler := NewPreviewHandler(r.Client, log, r.PreviewDomain)
+	prNumber := strings.TrimPrefix(ks.Namespace, "preview-pr-")
+
+	// Teardown: on deletion, clean up the cluster-scoped VSCs (Retain) and the
+	// prod-namespace VolumeSnapshots the clone created — namespace deletion can't
+	// GC them, so without this they leak orphaned Ceph snapshots.
+	if !ks.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&ks, PreviewFinalizer) {
+			if err := handler.TeardownSnapshots(ctx, appName, prNumber); err != nil {
+				log.Error(err, "snapshot teardown failed; will retry")
+				return ctrl.Result{RequeueAfter: 15 * time.Second}, err
+			}
+			controllerutil.RemoveFinalizer(&ks, PreviewFinalizer)
+			if err := r.Update(ctx, &ks); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Ensure the cleanup finalizer is present before we create any snapshots.
+	if controllerutil.AddFinalizer(&ks, PreviewFinalizer) {
+		if err := r.Update(ctx, &ks); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	// State 1: Kustomization is suspended → prepare patches and unsuspend
 	if ks.Spec.Suspend {
@@ -108,6 +145,21 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// New flow: 3-state progression after patches are applied
 	if annotations[PatchesAppliedAnnotation] == "true" {
+		// Re-render if the PreviewConfig changed since we last prepared (e.g. an
+		// added removeContainers / extraEnv). Reset only the patch + credential
+		// state; keep infra-created so we DON'T re-clone, then re-prepare.
+		if hash, err := handler.PreviewConfigHash(ctx, ks.Namespace, appName); err == nil && hash != "" && annotations[ConfigHashAnnotation] != hash {
+			log.Info("PreviewConfig changed, re-rendering patches", "app", appName)
+			delete(annotations, PatchesAppliedAnnotation)
+			delete(annotations, CredentialsPatchedAnnotation)
+			ks.SetAnnotations(annotations)
+			ks.Spec.Suspend = true
+			if err := r.Update(ctx, &ks); err != nil {
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+
 		// State 2: Create infrastructure (CNPG, Redis, S3, etc.)
 		if annotations[InfraCreatedAnnotation] != "true" {
 			log.Info("Creating preview infrastructure", "app", appName)
