@@ -24,6 +24,14 @@ import (
 
 const migrationCheckFinalizer = "preview.homelab.io/migration-check"
 
+// warmSnapshotMaxAge is how fresh a shared "warm" source snapshot must be to be
+// reused by a MigrationCheck. Migration checks validate that migrations apply
+// against real data shapes, for which data a few hours old is fine; a generous
+// ceiling means most checks in a burst of PR activity restore instantly, while
+// the snapshot is still refreshed often enough to stay representative. The first
+// check past this window pays the one-off snapshot cost, then it's warm again.
+const warmSnapshotMaxAge = 12 * time.Hour
+
 // MigrationCheckReconciler provisions a throwaway, snapshot-based CNPG clone of a
 // production database so CI can run an app's migrations against real data before
 // merge, then tears it down on delete / TTL.
@@ -133,6 +141,11 @@ func (r *MigrationCheckReconciler) provision(ctx context.Context, log logr.Logge
 		clusterName:      fmt.Sprintf("migcheck-%s", id),
 		snapshotClass:    "ceph-block-snapshot",
 		labels:           labels,
+		// Reuse a shared, long-lived warm snapshot of this source cluster across
+		// checks instead of snapshotting the live primary every run — keyed by
+		// cluster so every app cloning the same DB shares it.
+		warmSnapshotName: fmt.Sprintf("migcheck-warm-%s", srcCluster),
+		warmMaxAge:       warmSnapshotMaxAge,
 	}
 	if err := h.cloneCNPGFromSnapshot(ctx, clone); err != nil {
 		return r.fail(ctx, log, mc, fmt.Errorf("clone from snapshot: %w", err))
@@ -239,11 +252,17 @@ func (r *MigrationCheckReconciler) checkReady(ctx context.Context, log logr.Logg
 	return ctrl.Result{RequeueAfter: remaining}, nil
 }
 
-// teardown removes everything the clone created. The throwaway namespace deletion
-// reaps the CNPG cluster, PVCs, restore VolumeSnapshot and superuser secret; the
-// cluster-scoped VolumeSnapshotContent and the production VolumeSnapshot are
-// deleted explicitly (the latter reclaims the CSI snapshot), and so is the result
-// Secret in the CR namespace (#5). All deletes are idempotent.
+// teardown removes everything this individual clone created. The throwaway
+// namespace deletion reaps the CNPG cluster, PVCs, restore VolumeSnapshot and
+// superuser secret; the per-run cluster-scoped VolumeSnapshotContent (Retain, so
+// deleting it never touches the underlying CSI snapshot) and the result Secret in
+// the CR namespace are deleted explicitly (#5). All deletes are idempotent.
+//
+// The shared "warm" source snapshot (migcheck-warm-<cluster>) is deliberately NOT
+// deleted here — it's reused by subsequent checks and only recycled when a later
+// check finds it past warmSnapshotMaxAge. The legacy per-run prod snapshot delete
+// below is a no-op under warm reuse (that name is no longer created) and stays for
+// back-compat with any in-flight non-warm clone.
 func (r *MigrationCheckReconciler) teardown(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck) error {
 	id := migCheckID(mc)
 
