@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -62,6 +63,30 @@ func TestMigCheckID_StableAndDNSSafe(t *testing.T) {
 	mc2 := &previewv1.MigrationCheck{ObjectMeta: metav1.ObjectMeta{UID: types.UID("00000000-1111-2222-3333-444444444444")}}
 	if migCheckID(mc2) == a {
 		t.Errorf("distinct UIDs produced same id")
+	}
+}
+
+func TestWarmSnapshotUsable(t *testing.T) {
+	const maxAge = 12 * time.Hour
+	cases := []struct {
+		name  string
+		ready bool
+		age   time.Duration
+		want  bool
+	}{
+		{"ready and fresh", true, 30 * time.Minute, true},
+		{"ready at just under ceiling", true, maxAge - time.Minute, true},
+		{"ready but exactly at ceiling", true, maxAge, false},
+		{"ready but past ceiling", true, maxAge + time.Hour, false},
+		{"fresh but not ready", false, time.Minute, false},
+		{"not ready and stale", false, maxAge + time.Hour, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := warmSnapshotUsable(tc.ready, tc.age, maxAge); got != tc.want {
+				t.Errorf("warmSnapshotUsable(ready=%v, age=%s) = %v, want %v", tc.ready, tc.age, got, tc.want)
+			}
+		})
 	}
 }
 

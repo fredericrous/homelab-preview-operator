@@ -1,6 +1,6 @@
 module github.com/fredericrous/homelab-preview-operator
 
-go 1.25.11
+go 1.25.12
 
 require (
 	github.com/fluxcd/kustomize-controller/api v1.4.0
