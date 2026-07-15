@@ -125,12 +125,19 @@ func (h *PreviewHandler) cloneCNPGFromSnapshot(ctx context.Context, c cnpgClone)
 		},
 		"postgresql": map[string]interface{}{
 			"shared_preload_libraries": []interface{}{"pg_stat_statements"},
-			"parameters":               map[string]interface{}{"shared_buffers": "128MB", "max_connections": "50"},
+			"parameters":               map[string]interface{}{"shared_buffers": "512MB", "max_connections": "50"},
 		},
 		"storage": map[string]interface{}{"size": restoreSize, "storageClass": sourceStorageClass},
+		// The clone is short-lived but its bring-up is latency-critical: the
+		// consumer (e.g. the migration-check CI job) waits on a deadline, and a
+		// clone that boots too slowly is a false failure. Snapshot restore +
+		// crash-recovery + first-connection is CPU- and IO-heavy, so a 500m cap
+		// throttled startup badly (observed ~6min to accept connections against
+		// a multi-DB source). Give it real headroom — it lives for minutes and
+		// the extra request is reclaimed at teardown.
 		"resources": map[string]interface{}{
-			"requests": map[string]interface{}{"memory": "256Mi", "cpu": "100m"},
-			"limits":   map[string]interface{}{"memory": "512Mi", "cpu": "500m"},
+			"requests": map[string]interface{}{"memory": "512Mi", "cpu": "500m"},
+			"limits":   map[string]interface{}{"memory": "2Gi", "cpu": "4"},
 		},
 		"enableSuperuserAccess": true,
 	}
