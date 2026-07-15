@@ -66,7 +66,7 @@ func (r *MigrationCheckReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			}
 			controllerutil.RemoveFinalizer(mc, migrationCheckFinalizer)
 			if err := r.Update(ctx, mc); err != nil {
-				return ctrl.Result{}, err
+				return requeueOnConflict(err)
 			}
 		}
 		return ctrl.Result{}, nil
@@ -76,7 +76,7 @@ func (r *MigrationCheckReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if !controllerutil.ContainsFinalizer(mc, migrationCheckFinalizer) {
 		controllerutil.AddFinalizer(mc, migrationCheckFinalizer)
 		if err := r.Update(ctx, mc); err != nil {
-			return ctrl.Result{}, err
+			return requeueOnConflict(err)
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -157,13 +157,15 @@ func (r *MigrationCheckReconciler) provision(ctx context.Context, log logr.Logge
 	mc.Status.CloneNamespace = cloneNS
 	mc.Status.ExpiresAt = &metav1.Time{Time: expires}
 	if err := r.Status().Update(ctx, mc); err != nil {
-		return ctrl.Result{}, err
+		return requeueOnConflict(err)
 	}
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-// checkReady waits until the clone actually accepts connections, then publishes
-// the DATABASE_URL secret. "Ready" means: CNPG readyInstances>=1 AND the -rw
+// checkReady waits until the clone actually accepts connections AND has
+// settled, then publishes the DATABASE_URL secret. "Ready" means: the CNPG
+// cluster is SETTLED (readyInstances>=1 and phase "Cluster in healthy state" —
+// see cnpgClusterSettled for why serving alone is not enough) AND the -rw
 // Service has a ready endpoint (CNPG only adds the primary to -rw once its
 // readiness probe — a real connection check — passes) AND the superuser secret
 // exists. Only then does CI get a connection string (#1).
@@ -180,9 +182,8 @@ func (r *MigrationCheckReconciler) checkReady(ctx context.Context, log logr.Logg
 		}
 		return ctrl.Result{}, err
 	}
-	ready, _, _ := unstructured.NestedInt64(cluster.Object, "status", "readyInstances")
-	if ready < 1 {
-		log.V(1).Info("clone not ready yet", "readyInstances", ready)
+	if settled, state := cnpgClusterSettled(cluster); !settled {
+		log.V(1).Info("clone not ready yet", "state", state)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
@@ -245,7 +246,7 @@ func (r *MigrationCheckReconciler) checkReady(ctx context.Context, log logr.Logg
 	mc.Status.ConnectionSecretName = secretName
 	mc.Status.ConnectionSecretNamespace = mc.Namespace
 	if err := r.Status().Update(ctx, mc); err != nil {
-		return ctrl.Result{}, err
+		return requeueOnConflict(err)
 	}
 	log.Info("MigrationCheck ready", "secret", secretName, "cloneNamespace", cloneNS)
 	_, remaining := r.ttlExpired(mc)
@@ -350,7 +351,7 @@ func (r *MigrationCheckReconciler) fail(ctx context.Context, log logr.Logger, mc
 	mc.Status.Phase = previewv1.MigrationCheckFailed
 	mc.Status.Message = err.Error()
 	if uerr := r.Status().Update(ctx, mc); uerr != nil {
-		return ctrl.Result{}, uerr
+		return requeueOnConflict(uerr)
 	}
 	return ctrl.Result{}, nil
 }
@@ -386,6 +387,39 @@ func buildDatabaseURL(user, pass, host, db string) string {
 		RawQuery: "sslmode=disable",
 	}
 	return u.String()
+}
+
+// requeueOnConflict converts an optimistic-concurrency conflict on a
+// MigrationCheck write into a quiet immediate requeue. Conflicts here are
+// benign: the informer cache served a stale object — typically to the
+// watch-triggered duplicate of the reconcile whose own write just bumped the
+// resourceVersion (observed 2026-07-15: the duplicate re-ran provisioning
+// end-to-end, then errored "the object has been modified"). Surfacing the
+// error logs a Reconciler error and retries with backoff against the same
+// stale view; requeueing re-reads fresh state and no-ops.
+func requeueOnConflict(err error) (ctrl.Result, error) {
+	if errors.IsConflict(err) {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return ctrl.Result{}, err
+}
+
+// cnpgPhaseHealthy is CNPG's terminal "everything applied and running" phase.
+const cnpgPhaseHealthy = "Cluster in healthy state"
+
+// cnpgClusterSettled reports whether a CNPG cluster is fully SETTLED — not just
+// serving. During a snapshot-recovery bootstrap the cluster reaches
+// readyInstances>=1 BEFORE CNPG's final config-apply restart of the promoted
+// primary; publishing Ready on readyInstances alone hands CI a DSN whose -rw
+// endpoints go dark again seconds later (observed 2026-07-15: TCP fine at
+// Ready+2s, Postgres protocol connect timed out at +95s, fine at +157s —
+// exactly the restart window). status.phase only reaches "Cluster in healthy
+// state" once every pending restart has been applied, so gate on both.
+func cnpgClusterSettled(cluster *unstructured.Unstructured) (bool, string) {
+	ready, _, _ := unstructured.NestedInt64(cluster.Object, "status", "readyInstances")
+	phase, _, _ := unstructured.NestedString(cluster.Object, "status", "phase")
+	return ready >= 1 && phase == cnpgPhaseHealthy,
+		fmt.Sprintf("readyInstances=%d phase=%q", ready, phase)
 }
 
 // endpointsReady reports whether an Endpoints object has at least one ready address.
