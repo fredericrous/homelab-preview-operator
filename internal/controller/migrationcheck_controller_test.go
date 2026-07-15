@@ -1,13 +1,17 @@
 package controller
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
 	previewv1 "github.com/fredericrous/homelab-preview-operator/api/v1"
@@ -102,5 +106,62 @@ func TestEndpointsReady(t *testing.T) {
 	ready := &corev1.Endpoints{Subsets: []corev1.EndpointSubset{{Addresses: []corev1.EndpointAddress{{IP: "1.2.3.4"}}}}}
 	if !endpointsReady(ready) {
 		t.Error("ready Endpoints reported not ready")
+	}
+}
+
+func TestCnpgClusterSettled(t *testing.T) {
+	mk := func(ready int64, phase string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{Object: map[string]any{
+			"status": map[string]any{
+				"readyInstances": ready,
+				"phase":          phase,
+			},
+		}}
+		return u
+	}
+	cases := []struct {
+		name string
+		obj  *unstructured.Unstructured
+		want bool
+	}{
+		// The 2026-07-15 incident shape: instance serving (readyInstances=1)
+		// but CNPG still has a config-apply restart pending — publishing Ready
+		// here hands CI a DSN that goes dark mid-migration.
+		{"serving but restart pending", mk(1, "Primary instance is being restarted in-place"), false},
+		{"healthy", mk(1, "Cluster in healthy state"), true},
+		{"no ready instances", mk(0, "Cluster in healthy state"), false},
+		{"bootstrapping", mk(0, "Setting up primary"), false},
+		{"no status at all", &unstructured.Unstructured{Object: map[string]any{}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, state := cnpgClusterSettled(tc.obj)
+			if got != tc.want {
+				t.Errorf("cnpgClusterSettled() = %v (%s), want %v", got, state, tc.want)
+			}
+		})
+	}
+}
+
+func TestRequeueOnConflict(t *testing.T) {
+	gr := schema.GroupResource{Group: "preview.homelab.io", Resource: "migrationchecks"}
+	conflict := errors.NewConflict(gr, "wb-1", fmt.Errorf("the object has been modified"))
+
+	// A conflict (stale informer cache — e.g. the watch-triggered duplicate of
+	// the reconcile that just wrote) must requeue QUIETLY, not surface as a
+	// Reconciler error that re-runs provisioning against the stale view.
+	res, err := requeueOnConflict(conflict)
+	if err != nil {
+		t.Errorf("conflict must not surface as error, got %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("conflict must requeue, got %+v", res)
+	}
+
+	// Anything else keeps failing loudly.
+	boom := fmt.Errorf("boom")
+	res, err = requeueOnConflict(boom)
+	if err == nil || res.Requeue {
+		t.Errorf("non-conflict must propagate: res=%+v err=%v", res, err)
 	}
 }
