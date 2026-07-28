@@ -1,4 +1,11 @@
-name: Dependency Review
+name: License Check
+
+# The dependency-review-action was dropped: it requires GitHub's Dependency
+# graph, which on a private repo also opens the door to Dependabot raising PRs
+# on its own. Without the graph the action hard-fails ("Dependency review is not
+# supported on this repository"), so it was a permanently red gate on any go.mod
+# change. Its two checks are already covered: govulncheck (pr.yml) scans for
+# vulnerabilities, and go-licenses below enforces licensing.
 
 on:
   pull_request:
@@ -9,23 +16,8 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  dependency-review:
-    name: Dependency Review
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Dependency Review
-        uses: actions/dependency-review-action@v4
-        with:
-          fail-on-severity: high
-          deny-licenses: GPL-3.0, AGPL-3.0
-          comment-summary-in-pr: always
-
   license-check:
     name: License Check
     runs-on: ubuntu-latest
