@@ -107,47 +107,8 @@ func (h *PreviewHandler) cloneCNPGFromSnapshot(ctx context.Context, c cnpgClone)
 	}
 
 	// --- Clone CNPG Cluster bootstrapped from the restore snapshot ---
-	cnpgSpec := map[string]interface{}{
-		"instances": int64(1),
-		"inheritedMetadata": map[string]interface{}{
-			"labels": map[string]interface{}{"istio.io/dataplane-mode": "none"},
-		},
-		"bootstrap": map[string]interface{}{
-			"recovery": map[string]interface{}{
-				"volumeSnapshots": map[string]interface{}{
-					"storage": map[string]interface{}{
-						"name":     c.vsName,
-						"kind":     "VolumeSnapshot",
-						"apiGroup": "snapshot.storage.k8s.io",
-					},
-				},
-			},
-		},
-		"postgresql": map[string]interface{}{
-			"shared_preload_libraries": []interface{}{"pg_stat_statements"},
-			"parameters":               map[string]interface{}{"shared_buffers": "512MB", "max_connections": "50"},
-		},
-		"storage": map[string]interface{}{"size": restoreSize, "storageClass": sourceStorageClass},
-		// The clone is short-lived but its bring-up is latency-critical: the
-		// consumer (e.g. the migration-check CI job) waits on a deadline, and a
-		// clone that boots too slowly is a false failure. Snapshot restore +
-		// crash-recovery + first-connection is CPU- and IO-heavy, so a 500m cap
-		// throttled startup badly (observed ~6min to accept connections against
-		// a multi-DB source). Give it real headroom — it lives for minutes and
-		// the extra request is reclaimed at teardown.
-		"resources": map[string]interface{}{
-			"requests": map[string]interface{}{"memory": "512Mi", "cpu": "500m"},
-			"limits":   map[string]interface{}{"memory": "2Gi", "cpu": "4"},
-		},
-		"enableSuperuserAccess": true,
-	}
-	// Match the source Postgres major version (#4): prefer imageName, else imageCatalogRef.
-	switch {
-	case sourceImage != "":
-		cnpgSpec["imageName"] = sourceImage
-	case sourceCatalogRef != nil:
-		cnpgSpec["imageCatalogRef"] = sourceCatalogRef
-	default:
+	cnpgSpec := buildCloneClusterSpec(c.vsName, restoreSize, sourceStorageClass, sourceImage, sourceCatalogRef)
+	if sourceImage == "" && sourceCatalogRef == nil {
 		h.log.Info("source cluster has neither imageName nor imageCatalogRef; CNPG will use its default image", "cluster", c.sourceCluster)
 	}
 
@@ -316,4 +277,80 @@ func newVolumeSnapshot(namespace, name string, labels map[string]string) *unstru
 		vs.SetLabels(labels)
 	}
 	return vs
+}
+
+// buildCloneClusterSpec returns the CNPG Cluster spec for a snapshot-restored
+// clone. Pure so the tuning that keeps bring-up under the consumer's deadline
+// (resources, and OSD-local placement) is assertable without a live cluster.
+func buildCloneClusterSpec(vsName, restoreSize, storageClass, sourceImage string, sourceCatalogRef interface{}) map[string]interface{} {
+	cnpgSpec := map[string]interface{}{
+		"instances": int64(1),
+		"inheritedMetadata": map[string]interface{}{
+			"labels": map[string]interface{}{"istio.io/dataplane-mode": "none"},
+		},
+		"bootstrap": map[string]interface{}{
+			"recovery": map[string]interface{}{
+				"volumeSnapshots": map[string]interface{}{
+					"storage": map[string]interface{}{
+						"name":     vsName,
+						"kind":     "VolumeSnapshot",
+						"apiGroup": "snapshot.storage.k8s.io",
+					},
+				},
+			},
+		},
+		"postgresql": map[string]interface{}{
+			"shared_preload_libraries": []interface{}{"pg_stat_statements"},
+			"parameters":               map[string]interface{}{"shared_buffers": "512MB", "max_connections": "50"},
+		},
+		"storage": map[string]interface{}{"size": restoreSize, "storageClass": storageClass},
+		// The clone is short-lived but its bring-up is latency-critical: the
+		// consumer (e.g. the migration-check CI job) waits on a deadline, and a
+		// clone that boots too slowly is a false failure. Snapshot restore +
+		// crash-recovery + first-connection is CPU- and IO-heavy, so a 500m cap
+		// throttled startup badly (observed ~6min to accept connections against
+		// a multi-DB source). Give it real headroom — it lives for minutes and
+		// the extra request is reclaimed at teardown.
+		"resources": map[string]interface{}{
+			"requests": map[string]interface{}{"memory": "512Mi", "cpu": "500m"},
+			"limits":   map[string]interface{}{"memory": "2Gi", "cpu": "4"},
+		},
+		// Bring-up is IO-bound, and CPU headroom alone did not fix it: postgres
+		// replays WAL off an encrypted (LUKS) RBD snapshot, so every read served
+		// from a remote OSD costs a network hop plus decrypt. Land the clone on
+		// a node that hosts an OSD and those reads stay local.
+		//
+		// Affinity to the OSD pods rather than a node label or node name: the
+		// set of OSD-hosting nodes is not labelled distinctly, and hardcoding
+		// hostnames rots the moment the cluster is rebalanced. Preferred, not
+		// required — if no OSD node can take the pod we want a slow clone, not
+		// an unschedulable one. `namespaces` is mandatory here: pod affinity
+		// defaults to the scheduled pod's own namespace, which is the throwaway
+		// clone namespace, where no OSD will ever run.
+		"affinity": map[string]interface{}{
+			"additionalPodAffinity": map[string]interface{}{
+				"preferredDuringSchedulingIgnoredDuringExecution": []interface{}{
+					map[string]interface{}{
+						"weight": int64(100),
+						"podAffinityTerm": map[string]interface{}{
+							"topologyKey": "kubernetes.io/hostname",
+							"namespaces":  []interface{}{"rook-ceph"},
+							"labelSelector": map[string]interface{}{
+								"matchLabels": map[string]interface{}{"app": "rook-ceph-osd"},
+							},
+						},
+					},
+				},
+			},
+		},
+		"enableSuperuserAccess": true,
+	}
+	// Match the source Postgres major version (#4): prefer imageName, else imageCatalogRef.
+	switch {
+	case sourceImage != "":
+		cnpgSpec["imageName"] = sourceImage
+	case sourceCatalogRef != nil:
+		cnpgSpec["imageCatalogRef"] = sourceCatalogRef
+	}
+	return cnpgSpec
 }
