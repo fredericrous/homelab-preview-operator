@@ -6,6 +6,9 @@ on:
 
 env:
   GOLANGCI_LINT_VERSION: v2.4.0
+  # Pinned: gosec now fails the build, so an unpinned @latest would let any
+  # upstream release turn CI red without a change on our side.
+  GOSEC_VERSION: v2.28.0
 
 jobs:
   validate:
@@ -87,7 +90,7 @@ jobs:
       - name: Run gosec security scanner
         id: gosec
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }}
           gosec -fmt sarif -out gosec-results.sarif ./... || echo "gosec_failed=true" >> $GITHUB_OUTPUT
           if [ ! -f gosec-results.sarif ]; then
             echo '{"version":"2.1.0","runs":[]}' > gosec-results.sarif
