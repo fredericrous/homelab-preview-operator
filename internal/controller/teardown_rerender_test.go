@@ -32,7 +32,12 @@ func TestHashPreviewConfigSpec(t *testing.T) {
 	if hashPreviewConfigSpec(a) == "" {
 		t.Fatal("expected a non-empty hash")
 	}
-	if hashPreviewConfigSpec(a) != hashPreviewConfigSpec(a) {
+	// Two separate calls, held in variables: comparing the calls inline reads
+	// as a tautology to the compiler and to staticcheck (SA4000), even though
+	// the point is that repeated hashing of the same spec agrees.
+	first := hashPreviewConfigSpec(a)
+	second := hashPreviewConfigSpec(a)
+	if first != second {
 		t.Error("hash must be deterministic")
 	}
 	if hashPreviewConfigSpec(a) == hashPreviewConfigSpec(b) {

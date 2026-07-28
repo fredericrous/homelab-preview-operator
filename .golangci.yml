@@ -1,0 +1,27 @@
+version: "2"
+
+# Replaces CodeQL. CodeQL's unique value was interprocedural taint tracking,
+# which buys little in an operator that reconciles CRs and talks to the API
+# server rather than handling untrusted input. What it was really providing —
+# security patterns and correctness — is covered here plus govulncheck (call-
+# graph aware, so it only fails on vulnerabilities actually reached).
+#
+# Defaults already on: errcheck, govet, ineffassign, staticcheck, unused.
+linters:
+  enable:
+    - gosec # security patterns: weak crypto, file perms, hardcoded creds
+    - bodyclose # leaked HTTP response bodies
+    - errorlint # %w wrapping + errors.Is/As instead of == comparisons
+    - nilerr # returning nil after a non-nil error (silently swallowed failures)
+    - misspell
+    - unconvert
+
+  exclusions:
+    rules:
+      # Test fixtures trip these constantly with no signal: an unchecked
+      # w.Write in a stub server, or a dummy token read as a credential.
+      # Correctness linters (staticcheck, nilerr, govet) still apply to tests.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec

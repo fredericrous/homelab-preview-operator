@@ -81,18 +81,23 @@ jobs:
             echo "vet_failed=false" >> $GITHUB_OUTPUT
           fi
 
+      # Findings now fail the build (via the gate at the end) instead of only
+      # being filed in the Security tab, where nothing was reading them. The
+      # SARIF is still produced and uploaded either way.
       - name: Run gosec security scanner
         id: gosec
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -no-fail -fmt sarif -out gosec-results.sarif ./... || true
+          gosec -fmt sarif -out gosec-results.sarif ./... || echo "gosec_failed=true" >> $GITHUB_OUTPUT
           if [ ! -f gosec-results.sarif ]; then
             echo '{"version":"2.1.0","runs":[]}' > gosec-results.sarif
           fi
 
+      # upload-sarif is just the SARIF uploader; it does not depend on CodeQL
+      # analysis, which this repo no longer runs.
       - name: Upload gosec results
         uses: github/codeql-action/upload-sarif@v3
-        if: steps.gosec.outcome == 'success'
+        if: always()
         with:
           sarif_file: gosec-results.sarif
 
@@ -134,7 +139,7 @@ jobs:
           | Code Formatting | ${{ steps.fmt.outputs.formatting_needed == 'false' && 'Passed' || 'Failed' }} |
           | Go Vet | ${{ steps.vet.outputs.vet_failed == 'false' && 'Passed' || 'Failed' }} |
           | GolangCI-Lint | ${{ steps.lint.outputs.lint_failed != 'true' && 'Passed' || 'Failed' }} |
-          | Security Scan | Completed (check Security tab) |
+          | Security Scan (gosec) | ${{ steps.gosec.outputs.gosec_failed != 'true' && 'Passed' || 'Failed' }} |
           | Unit Tests | ${{ steps.unit_tests.outputs.unit_tests_passed == 'true' && 'Passed' || 'Failed' }} |
           | Code Coverage | ${COVERAGE:-N/A} |
 
@@ -184,9 +189,11 @@ jobs:
               });
             }
 
-      - name: Fail if tests failed
+      - name: Fail if checks failed
         if: |
           steps.fmt.outputs.formatting_needed == 'true' ||
           steps.vet.outputs.vet_failed == 'true' ||
+          steps.lint.outputs.lint_failed == 'true' ||
+          steps.gosec.outputs.gosec_failed == 'true' ||
           steps.unit_tests.outputs.unit_tests_passed != 'true'
         run: exit 1
