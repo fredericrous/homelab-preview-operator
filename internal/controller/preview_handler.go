@@ -1039,7 +1039,14 @@ func (h *PreviewHandler) ensureHelmReleaseValues(ctx context.Context, namespace,
 
 	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
 	if err != nil {
-		return false, nil
+		// No PreviewConfig for this app is a legitimate "nothing to do".
+		// Anything else (API server down, RBAC) must surface, or a real
+		// failure looks identical to an unconfigured app and the
+		// HelmRelease is silently left unpatched.
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
 	}
 
 	if config.Spec.DeploymentType != v1.DeploymentTypeHelm || config.Spec.HelmValues == nil {
@@ -1065,7 +1072,10 @@ func (h *PreviewHandler) ensureHelmReleaseValues(ctx context.Context, namespace,
 		Kind:    "HelmRelease",
 	})
 	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: appName}, hr); err != nil {
-		return false, nil // Not created yet
+		if errors.IsNotFound(err) {
+			return false, nil // Not created yet — Flux hasn't reconciled it
+		}
+		return false, err
 	}
 
 	// Get current spec.values

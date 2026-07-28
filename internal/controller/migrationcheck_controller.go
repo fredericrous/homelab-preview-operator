@@ -372,7 +372,7 @@ func migCheckID(mc *previewv1.MigrationCheck) string {
 		id = id[:12]
 	}
 	if id == "" {
-		id = "n" + string(mc.Name) // fallback; UID is always set in-cluster
+		id = "n" + mc.Name // fallback; UID is always set in-cluster
 	}
 	return id
 }

@@ -84,11 +84,6 @@ func buildCommentBody(appName, prNumber, previewURL string) string {
 		commentMarker, appName, prNumber, previewURL, previewURL)
 }
 
-// findExistingComment searches for a comment with our marker on the given PR.
-func findExistingComment(token, repo, prNumber string) (*githubComment, error) {
-	return findExistingCommentWithURL(token, repo, prNumber, githubAPIBaseURL)
-}
-
 // findExistingCommentWithURL is the testable variant that accepts a custom GitHub API base URL.
 func findExistingCommentWithURL(token, repo, prNumber, apiBaseURL string) (*githubComment, error) {
 	url := fmt.Sprintf("%s/repos/%s/issues/%s/comments", apiBaseURL, repo, prNumber)
@@ -104,7 +99,7 @@ func findExistingCommentWithURL(token, repo, prNumber, apiBaseURL string) (*gith
 	if err != nil {
 		return nil, fmt.Errorf("listing comments: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -122,11 +117,6 @@ func findExistingCommentWithURL(token, repo, prNumber, apiBaseURL string) (*gith
 		}
 	}
 	return nil, nil
-}
-
-// createComment posts a new comment on the given PR.
-func createComment(token, repo, prNumber, body string) error {
-	return createCommentWithURL(token, repo, prNumber, body, githubAPIBaseURL)
 }
 
 // createCommentWithURL is the testable variant that accepts a custom GitHub API base URL.
@@ -150,7 +140,7 @@ func createCommentWithURL(token, repo, prNumber, body, apiBaseURL string) error 
 	if err != nil {
 		return fmt.Errorf("creating comment: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -158,11 +148,6 @@ func createCommentWithURL(token, repo, prNumber, body, apiBaseURL string) error 
 	}
 
 	return nil
-}
-
-// updateComment updates an existing comment on the given repo.
-func updateComment(token, repo string, commentID int, body string) error {
-	return updateCommentWithURL(token, repo, commentID, body, githubAPIBaseURL)
 }
 
 // updateCommentWithURL is the testable variant that accepts a custom GitHub API base URL.
@@ -186,7 +171,7 @@ func updateCommentWithURL(token, repo string, commentID int, body, apiBaseURL st
 	if err != nil {
 		return fmt.Errorf("updating comment: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
