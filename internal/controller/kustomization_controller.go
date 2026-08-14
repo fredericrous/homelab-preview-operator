@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 )
 
 const (
@@ -54,7 +55,16 @@ type KustomizationReconciler struct {
 	Log           logr.Logger
 	Scheme        *runtime.Scheme
 	PreviewDomain string
-	GitHubRepo    string
+	// GitRepo is the "owner/repo" slug PR comments are posted to. Empty
+	// disables commenting.
+	GitRepo string
+	// GitProvider selects the forge API flavour: ProviderGitHub (default) or
+	// ProviderGitea, which Forgejo also speaks.
+	GitProvider string
+	// GitAPIBaseURL overrides the forge API root. Empty means api.github.com
+	// for GitHub, and for Gitea/Forgejo the host of the Flux GitRepository the
+	// preview Kustomization syncs from.
+	GitAPIBaseURL string
 }
 
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch;update;patch
@@ -187,10 +197,10 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 
 		// Post a PR comment with the preview URL (once, non-blocking)
-		if annotations[PRCommentedAnnotation] != "true" && r.GitHubRepo != "" {
+		if annotations[PRCommentedAnnotation] != "true" && r.GitRepo != "" {
 			prNumber := strings.TrimPrefix(ks.Namespace, "preview-pr-")
 			previewURL := fmt.Sprintf("https://pr-%s-%s.%s", prNumber, appName, r.PreviewDomain)
-			if err := PostPRComment(ctx, r.Client, ks.Namespace, r.GitHubRepo, prNumber, appName, previewURL, log); err != nil {
+			if err := r.postPreviewComment(ctx, &ks, prNumber, appName, previewURL, log); err != nil {
 				log.Error(err, "Failed to post PR comment", "pr", prNumber)
 			} else {
 				annotations[PRCommentedAnnotation] = "true"
@@ -236,6 +246,68 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	log.Info("Successfully processed preview environment", "app", appName)
 	return ctrl.Result{}, nil
+}
+
+// postPreviewComment resolves which forge to talk to and posts (or updates)
+// the preview-URL comment on the PR.
+func (r *KustomizationReconciler) postPreviewComment(ctx context.Context, ks *kustomizev1.Kustomization, prNumber, appName, previewURL string, log logr.Logger) error {
+	forge, err := r.forgeConfig(ctx, ks)
+	if err != nil {
+		return fmt.Errorf("resolving forge API endpoint: %w", err)
+	}
+	return PostPRComment(ctx, r.Client, ks.Namespace, forge, prNumber, appName, previewURL, log)
+}
+
+// forgeConfig resolves the forge the PR lives on. For Gitea/Forgejo with no
+// explicitly configured API base URL, the host is taken from the Flux
+// GitRepository the Kustomization syncs from, so a self-hosted instance needs
+// no extra configuration beyond --git-provider=gitea.
+func (r *KustomizationReconciler) forgeConfig(ctx context.Context, ks *kustomizev1.Kustomization) (ForgeConfig, error) {
+	cfg := ForgeConfig{
+		Provider:   r.GitProvider,
+		APIBaseURL: r.GitAPIBaseURL,
+		Repo:       r.GitRepo,
+	}
+	if cfg.Provider == "" {
+		cfg.Provider = ProviderGitHub
+	}
+	if cfg.Provider != ProviderGitea || cfg.APIBaseURL != "" {
+		return cfg, nil
+	}
+
+	cloneURL, err := r.sourceCloneURL(ctx, ks)
+	if err != nil {
+		return cfg, err
+	}
+	baseURL, err := apiBaseURLFromCloneURL(cloneURL)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.APIBaseURL = baseURL
+
+	return cfg, nil
+}
+
+// sourceCloneURL returns the git URL of the GitRepository the Kustomization
+// syncs from.
+func (r *KustomizationReconciler) sourceCloneURL(ctx context.Context, ks *kustomizev1.Kustomization) (string, error) {
+	ref := ks.Spec.SourceRef
+	if ref.Kind != sourcev1.GitRepositoryKind {
+		return "", fmt.Errorf("source %s/%s is a %s, not a %s", ref.Namespace, ref.Name, ref.Kind, sourcev1.GitRepositoryKind)
+	}
+
+	namespace := ref.Namespace
+	if namespace == "" {
+		namespace = ks.Namespace
+	}
+
+	var source sourcev1.GitRepository
+	key := client.ObjectKey{Namespace: namespace, Name: ref.Name}
+	if err := r.Get(ctx, key, &source); err != nil {
+		return "", fmt.Errorf("reading GitRepository %s/%s: %w", namespace, ref.Name, err)
+	}
+
+	return source.Spec.URL, nil
 }
 
 // SetupWithManager sets up the controller with the Manager

@@ -85,6 +85,26 @@ spec:
     redisHost: app.config.redis.host
 ```
 
+## PR Comments
+
+When a preview environment is ready, the operator posts (and later updates) a
+comment carrying the preview URL on the pull request. Two forges are supported:
+
+| Provider | API | Notes |
+|----------|-----|-------|
+| `github` | `https://api.github.com` | Default. Set `--git-api-base-url` for GitHub Enterprise |
+| `gitea` | `<host>/api/v1` | Gitea and Forgejo (a Gitea fork serving the same API) |
+
+For a self-hosted Forgejo, `--git-provider=gitea` is usually the only flag
+needed: the API host is derived from the Flux `GitRepository` the preview
+Kustomization syncs from (e.g. `https://git.example.com/owner/repo.git` →
+`https://git.example.com/api/v1`). Set `--git-api-base-url` explicitly when the
+API lives somewhere else.
+
+The API token is read from the `github-token` secret in the preview namespace
+(the name is historical — Forgejo tokens go in the same place), under either the
+`password` or the `token` key.
+
 ## Requirements
 
 - Flux CD (Kustomization controller, Source controller)
@@ -110,6 +130,9 @@ make deploy
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--preview-domain` | `daddyshome.fr` | Domain for preview URLs |
+| `--github-repo` | `fredericrous/homelab` | Repository (`owner/repo`) PR comments are posted to; empty disables commenting |
+| `--git-provider` | `github` | Forge API flavour: `github` or `gitea` (Forgejo speaks the Gitea API) |
+| `--git-api-base-url` | _(empty)_ | Forge API base URL. Empty means `https://api.github.com` for `github`; for `gitea` it is derived from the Flux GitRepository the preview syncs from |
 | `--leader-elect` | `false` | Enable leader election |
 | `--metrics-bind-address` | `:8080` | Metrics endpoint |
 | `--health-probe-bind-address` | `:8081` | Health probe endpoint |

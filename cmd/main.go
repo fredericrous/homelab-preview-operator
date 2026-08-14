@@ -35,7 +35,9 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var previewDomain string
-	var githubRepo string
+	var gitRepo string
+	var gitProvider string
+	var gitAPIBaseURL string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -43,7 +45,12 @@ func main() {
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.StringVar(&previewDomain, "preview-domain", "daddyshome.fr", "The domain for preview URLs.")
-	flag.StringVar(&githubRepo, "github-repo", "fredericrous/homelab", "The GitHub repository (owner/repo) for posting PR comments.")
+	flag.StringVar(&gitRepo, "github-repo", "fredericrous/homelab", "The repository (owner/repo) for posting PR comments.")
+	flag.StringVar(&gitProvider, "git-provider", controller.ProviderGitHub,
+		"The forge API flavour to post PR comments with: github or gitea (Forgejo speaks the Gitea API).")
+	flag.StringVar(&gitAPIBaseURL, "git-api-base-url", "",
+		"The forge API base URL. Defaults to https://api.github.com for github, "+
+			"and for gitea to the host of the Flux GitRepository the preview syncs from.")
 
 	opts := zap.Options{
 		Development: true,
@@ -69,7 +76,9 @@ func main() {
 		Log:           ctrl.Log.WithName("controllers").WithName("Kustomization"),
 		Scheme:        mgr.GetScheme(),
 		PreviewDomain: previewDomain,
-		GitHubRepo:    githubRepo,
+		GitRepo:       gitRepo,
+		GitProvider:   gitProvider,
+		GitAPIBaseURL: gitAPIBaseURL,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Kustomization")
 		os.Exit(1)
