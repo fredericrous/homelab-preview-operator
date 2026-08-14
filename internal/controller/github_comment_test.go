@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +42,18 @@ func TestBuildCommentBodyContainsClickableLink(t *testing.T) {
 	}
 }
 
+func TestGitHubDefaultBaseURL(t *testing.T) {
+	c := newGitHubClient("", "test-token")
+	if c.baseURL != githubAPIBaseURL {
+		t.Errorf("expected default base URL %q, got %q", githubAPIBaseURL, c.baseURL)
+	}
+
+	c = newGitHubClient("https://github.example.com/api/v3/", "test-token")
+	if c.baseURL != "https://github.example.com/api/v3" {
+		t.Errorf("expected trailing slash trimmed, got %q", c.baseURL)
+	}
+}
+
 func TestCreateComment(t *testing.T) {
 	var receivedBody map[string]string
 	var receivedAuth string
@@ -64,7 +77,7 @@ func TestCreateComment(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := createCommentWithURL("test-token", "owner/repo", "42", "test body", server.URL)
+	err := newGitHubClient(server.URL, "test-token").CreateComment(context.Background(), "owner/repo", "42", "test body")
 	if err != nil {
 		t.Fatalf("createComment failed: %v", err)
 	}
@@ -84,17 +97,20 @@ func TestCreateCommentErrorStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := createCommentWithURL("bad-token", "owner/repo", "42", "test", server.URL)
+	err := newGitHubClient(server.URL, "bad-token").CreateComment(context.Background(), "owner/repo", "42", "test")
 	if err == nil {
 		t.Fatal("expected error for 403 response")
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("error should mention status code: %v", err)
 	}
+	if !strings.Contains(err.Error(), "GitHub") {
+		t.Errorf("error should name the provider: %v", err)
+	}
 }
 
 func TestFindExistingComment(t *testing.T) {
-	comments := []githubComment{
+	comments := []forgeComment{
 		{ID: 1, Body: "some other comment"},
 		{ID: 2, Body: commentMarker + "\n## Preview Ready"},
 		{ID: 3, Body: "another comment"},
@@ -110,7 +126,7 @@ func TestFindExistingComment(t *testing.T) {
 	}))
 	defer server.Close()
 
-	found, err := findExistingCommentWithURL("test-token", "owner/repo", "10", server.URL)
+	found, err := newGitHubClient(server.URL, "test-token").FindComment(context.Background(), "owner/repo", "10")
 	if err != nil {
 		t.Fatalf("findExistingComment failed: %v", err)
 	}
@@ -123,7 +139,7 @@ func TestFindExistingComment(t *testing.T) {
 }
 
 func TestFindExistingCommentNotFound(t *testing.T) {
-	comments := []githubComment{
+	comments := []forgeComment{
 		{ID: 1, Body: "unrelated comment"},
 	}
 
@@ -133,7 +149,7 @@ func TestFindExistingCommentNotFound(t *testing.T) {
 	}))
 	defer server.Close()
 
-	found, err := findExistingCommentWithURL("test-token", "owner/repo", "10", server.URL)
+	found, err := newGitHubClient(server.URL, "test-token").FindComment(context.Background(), "owner/repo", "10")
 	if err != nil {
 		t.Fatalf("findExistingComment failed: %v", err)
 	}
@@ -159,7 +175,7 @@ func TestUpdateComment(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := updateCommentWithURL("test-token", "owner/repo", 99, "updated body", server.URL)
+	err := newGitHubClient(server.URL, "test-token").UpdateComment(context.Background(), "owner/repo", 99, "updated body")
 	if err != nil {
 		t.Fatalf("updateComment failed: %v", err)
 	}

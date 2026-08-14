@@ -38,6 +38,12 @@ spec:
             {{- if .Values.config.githubRepo }}
             - --github-repo={{ .Values.config.githubRepo }}
             {{- end }}
+            {{- if .Values.config.gitProvider }}
+            - --git-provider={{ .Values.config.gitProvider }}
+            {{- end }}
+            {{- if .Values.config.gitApiBaseUrl }}
+            - --git-api-base-url={{ .Values.config.gitApiBaseUrl }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}

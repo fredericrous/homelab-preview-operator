@@ -56,8 +56,14 @@ config:
   logLevel: info
   # Enable leader election (for HA deployments)
   leaderElect: false
-  # GitHub repository (owner/repo) for posting PR comments
+  # Repository (owner/repo) for posting PR comments
   githubRepo: ""
+  # Forge API flavour for PR comments: github or gitea.
+  # Forgejo speaks the Gitea API, so self-hosted Forgejo uses "gitea".
+  gitProvider: github
+  # Forge API base URL. Empty means https://api.github.com for github, and for
+  # gitea the host of the Flux GitRepository the preview syncs from.
+  gitApiBaseUrl: ""
 
 # Metrics configuration
 metrics:
