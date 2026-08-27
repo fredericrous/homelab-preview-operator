@@ -17,6 +17,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Attestation check
+        id: attest
+        uses: fredericrous/attest@v1
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -55,6 +59,7 @@ jobs:
           echo "KUBEBUILDER_ASSETS=$(${{ github.workspace }}/bin/setup-envtest use ${{ env.ENVTEST_K8S_VERSION }} --bin-dir ${{ github.workspace }}/bin -p path)" >> $GITHUB_ENV
 
       - name: Run tests
+        if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-go-test') }}
         env:
           KUBEBUILDER_CONTROLPLANE_START_TIMEOUT: 60s
           KUBEBUILDER_CONTROLPLANE_STOP_TIMEOUT: 60s
