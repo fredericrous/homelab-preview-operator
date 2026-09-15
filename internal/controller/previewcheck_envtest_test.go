@@ -26,13 +26,29 @@ import (
 // fails the HelmRelease outright under `crds: CreateReplace`), and whether the
 // defaulting and validation we wrote in markers actually behave as written.
 //
-// It is skipped when KUBEBUILDER_ASSETS is unset so `make test-unit` runs the
-// same package without a control plane; `make test-integration` provides them.
+// It is skipped when KUBEBUILDER_ASSETS is unset — or names a directory with
+// no kube-apiserver in it — so `make test-unit` runs the same package without
+// a control plane; `make test-integration` provides the binaries. The second
+// condition matters: a workflow that exports the variable before the assets
+// are downloaded (the v0.9.0 release run did exactly that) must degrade to
+// the unit run, not fail the whole package on fork/exec.
 var envtestClient client.Client
+
+// envtestAssetsPresent reports whether KUBEBUILDER_ASSETS points at a
+// directory that actually holds a control plane.
+func envtestAssetsPresent() bool {
+	dir := os.Getenv("KUBEBUILDER_ASSETS")
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "kube-apiserver"))
+	return err == nil
+}
 
 func TestMain(m *testing.M) {
 	os.Exit(func() int {
-		if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		if !envtestAssetsPresent() {
+			fmt.Fprintln(os.Stderr, "envtest: KUBEBUILDER_ASSETS unset or has no kube-apiserver — envtest cases skipped")
 			return m.Run()
 		}
 		cl, stop, err := startEnvtest()
@@ -72,8 +88,8 @@ func startEnvtest() (client.Client, func(), error) {
 
 func requireEnvtest(t *testing.T) client.Client {
 	t.Helper()
-	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
-		t.Skip("KUBEBUILDER_ASSETS is unset; run `make test-integration`")
+	if !envtestAssetsPresent() {
+		t.Skip("KUBEBUILDER_ASSETS is unset or has no kube-apiserver; run `make test-integration`")
 	}
 	if envtestClient == nil {
 		t.Fatal("envtest client was not initialised")
