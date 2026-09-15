@@ -1,4 +1,12 @@
-{{- if and .Values.metrics.enabled .Values.metrics.service.enabled .Values.metrics.serviceMonitor.enabled }}
+{{- /*
+Rendered only where the Prometheus Operator CRD exists: the charts repo's
+install test runs on a bare kind cluster and `helm install` fails on an
+unknown kind ("no matches for kind ServiceMonitor", charts run 34997459570 for
+0.9.1). Flux's helm-controller passes real cluster capabilities, so homelab
+still renders it. To force it regardless, set metrics.serviceMonitor.enabled
+AND install the CRD first — there is no override for a missing API.
+*/ -}}
+{{- if and .Values.metrics.enabled .Values.metrics.service.enabled .Values.metrics.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
