@@ -11,6 +11,45 @@ env:
   GOSEC_VERSION: v2.28.0
 
 jobs:
+  # A CRD or DeepCopy that only exists on the author's machine is the failure
+  # mode this catches: `crds: CreateReplace` means a CRD that never made it
+  # into git fails the HelmRelease outright at deploy time, long after review.
+  generated:
+    name: Generated files are up to date
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Regenerate manifests and deepcopy
+        run: make manifests generate
+
+      - name: Fail if the working tree changed
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::'make manifests generate' produced changes. Run it locally and commit the result."
+            exit 1
+          fi
+
+      # The release workflow copies config/crd/bases into the chart, but a chart
+      # rendered from a stale copy is what a reviewer reads, so keep them equal.
+      - name: CRDs vendored into the chart match config/crd/bases
+        run: |
+          for f in config/crd/bases/*.yaml; do
+            if ! diff -u "$f" "chart/homelab-preview-operator/crds/$(basename "$f")"; then
+              echo "::error::chart/homelab-preview-operator/crds/$(basename "$f") is stale; copy it from config/crd/bases."
+              exit 1
+            fi
+          done
+
   validate:
     name: Validate PR
     runs-on: ubuntu-latest
