@@ -72,7 +72,7 @@ type deleteCall struct {
 type fixture struct {
 	t       *testing.T
 	r       *PreviewCheckReconciler
-	cl      client.Client
+	cl      client.WithWatch
 	clock   *clocktesting.FakePassiveClock
 	rec     *record.FakeRecorder
 	enr     *stubEnricher
@@ -167,6 +167,21 @@ func (f *fixture) reconcile() ctrl.Result {
 		f.t.Fatalf("Reconcile: %v", err)
 	}
 	return res
+}
+
+// reconcileExpectingError runs one reconcile and hands back whatever it
+// returned, for the cases where surfacing an error IS the behaviour under test.
+func (f *fixture) reconcileExpectingError() error {
+	f.t.Helper()
+	_, err := f.r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "preview-check", Name: "pr-42"},
+	})
+	return err
+}
+
+// interceptorClient wraps a client so one API call can be made to fail.
+func interceptorClient(c client.WithWatch, funcs interceptor.Funcs) client.WithWatch {
+	return interceptor.NewClient(c, funcs)
 }
 
 // reconcileN drives the reconciler n times, so a test can express "advance the
@@ -1159,6 +1174,9 @@ func TestTerminalPhaseFor(t *testing.T) {
 	inconclusive := []string{
 		previewv1.ReasonScanMissing, previewv1.ReasonEnrichmentUnavailable,
 		previewv1.ReasonQuotaExceeded, previewv1.ReasonTimeout,
+		// "I found no Service to probe" is a statement about the operator's
+		// reach, not about the change.
+		previewv1.ReasonTargetUnresolved,
 	}
 	for _, reason := range inconclusive {
 		if got := terminalPhaseFor(reason); got != previewv1.PreviewCheckExpired {
@@ -1168,6 +1186,7 @@ func TestTerminalPhaseFor(t *testing.T) {
 	verdicts := []string{
 		previewv1.ReasonPodsNotReady, previewv1.ReasonRevisionMismatch,
 		previewv1.ReasonUnexpectedStatus, previewv1.ReasonProbeJobFailed,
+		previewv1.ReasonPodsNotReady,
 		previewv1.ReasonKEVExceeded, previewv1.ReasonEPSSExceeded,
 		previewv1.ReasonSmokeJobFailed, previewv1.ReasonAppMismatch,
 		previewv1.ReasonInvalidThreshold, previewv1.ReasonNamespaceGone,
@@ -1328,5 +1347,101 @@ func TestReconcile_EmitsAnEventAtEachTransition(t *testing.T) {
 	case e := <-f.rec.Events:
 		t.Errorf("a terminal, unchanged CR emitted another event (%d before): %s", before, e)
 	default:
+	}
+}
+
+func TestReconcile_PersistentErrorStillHonoursTheDeadline(t *testing.T) {
+	f := newFixture(t, happyObjects()...)
+	f.reconcileN(3) // finalizer, start, readiness
+
+	// An RBAC gap on Services: evaluateCheck returns an error, which is right —
+	// it is our problem, not a verdict about the change.
+	boom := fmt.Errorf("services is forbidden: RBAC gap")
+	f.r.Client = interceptorClient(f.cl, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, isSvc := list.(*corev1.ServiceList); isSvc {
+				return boom
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+
+	if err := f.reconcileExpectingError(); err == nil {
+		t.Fatal("a reconcile error must surface before the deadline, not be written down as a verdict")
+	}
+	if f.get().Status.Phase != previewv1.PreviewCheckRunning {
+		t.Errorf("phase = %s, want Running while retrying", f.get().Status.Phase)
+	}
+
+	// Past the deadline, though, retrying forever leaves the CR Running until
+	// the TTL — four times the deadline — and a caller polling for a verdict
+	// waits two hours for one that was never coming.
+	f.clock.SetTime(f.clock.Now().Add(31 * time.Minute))
+	if err := f.reconcileExpectingError(); err != nil {
+		t.Fatalf("past the deadline the error must resolve, not propagate: %v", err)
+	}
+	pc := f.get()
+	if pc.Status.Phase != previewv1.PreviewCheckExpired {
+		t.Errorf("phase = %s, want Expired", pc.Status.Phase)
+	}
+	if got := conditionReason(pc); got != previewv1.ReasonTimeout {
+		t.Errorf("reason = %q, want Timeout", got)
+	}
+	if !strings.Contains(pc.Status.Message, "RBAC gap") {
+		t.Errorf("the message must carry what actually went wrong, got %q", pc.Status.Message)
+	}
+}
+
+func TestReconcile_SmokeWithNoTargetIsInconclusiveNotAFailure(t *testing.T) {
+	objects := happyObjects()
+	// Only the smoke check, so the reason under test can only have come from
+	// it — the http check would otherwise stall on the same missing target.
+	objects[0] = newCheck(func(pc *previewv1.PreviewCheck) {
+		pc.Spec.Checks = []previewv1.PreviewCheckName{previewv1.CheckSmoke}
+	})
+	objects[6] = newPreviewConfig(&previewv1.SmokeTestConfig{Image: "smoke:1"})
+	// Drop the app Service so nothing resolves: no HTTPRoute, no <app> Service,
+	// and the only remaining Service is infrastructure.
+	objects[4] = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-preview-42-rw", Namespace: testNS},
+		Spec:       corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 5432}}},
+	}
+	f := newFixture(t, objects...)
+
+	f.reconcileN(4)
+	pc := f.get()
+	if smoke := findCheck(pc, previewv1.CheckSmoke); smoke == nil || smoke.Reason != previewv1.ReasonTargetUnresolved {
+		t.Fatalf("the smoke check itself must report TargetUnresolved, got %+v", smoke)
+	}
+
+	// Running the Job with an empty PREVIEW_URL would publish SmokeJobFailed —
+	// a verdict about the change — for the operator failing to find a Service.
+	for _, j := range f.jobs() {
+		if j.Labels[CheckNameLabel] == string(previewv1.CheckSmoke) {
+			t.Fatal("a smoke Job must not be created without a target URL")
+		}
+	}
+	if got := conditionReason(pc); got != previewv1.ReasonTargetUnresolved {
+		t.Fatalf("reason = %q (phase %s), want TargetUnresolved", got, pc.Status.Phase)
+	}
+
+	f.clock.SetTime(f.clock.Now().Add(31 * time.Minute))
+	f.reconcile()
+	if got := f.get().Status.Phase; got != previewv1.PreviewCheckExpired {
+		t.Errorf("phase = %s, want Expired: an unresolvable target is inconclusive", got)
+	}
+}
+
+func TestMetricApp_PrefersTheResolvedNamespaceLabel(t *testing.T) {
+	withSpec := newCheck()
+	if got := metricApp(withSpec, "navidrome-from-label"); got != "navidrome-from-label" {
+		t.Errorf("= %q, want the resolved label to win over spec.app", got)
+	}
+	if got := metricApp(withSpec, ""); got != testApp {
+		t.Errorf("= %q, want the spec.app fallback", got)
+	}
+	bare := newCheck(func(pc *previewv1.PreviewCheck) { pc.Spec.App = "" })
+	if got := metricApp(bare, ""); got != "unknown" {
+		t.Errorf("= %q, want unknown — an empty label value looks like a broken exporter", got)
 	}
 }

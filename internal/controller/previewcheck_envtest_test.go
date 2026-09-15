@@ -194,6 +194,12 @@ func TestEnvtest_PerFieldImmutability(t *testing.T) {
 		{"image", func(p *previewv1.PreviewCheck) { p.Spec.Image = "evil:latest" }},
 		{"revision", func(p *previewv1.PreviewCheck) { p.Spec.Revision = "deadbeef" }},
 		{"httpPath", func(p *previewv1.PreviewCheck) { p.Spec.HTTPPath = "/other" }},
+		// checks and expectStatus are SELECTORS, not tunables: both are read
+		// back after a probe Job has already been created against them.
+		{"checks", func(p *previewv1.PreviewCheck) {
+			p.Spec.Checks = []previewv1.PreviewCheckName{previewv1.CheckReadiness}
+		}},
+		{"expectStatus", func(p *previewv1.PreviewCheck) { p.Spec.ExpectStatus = []int32{200} }},
 	}
 	for _, tc := range immutable {
 		t.Run(tc.field, func(t *testing.T) {
@@ -335,6 +341,9 @@ func TestEnvtest_InvalidSpecRejected(t *testing.T) {
 			over := int32(1001)
 			p.Spec.Thresholds.EPSSMaxPermille = &over
 		}},
+		// `health` would otherwise concatenate into
+		// http://navidrome...:4533health and fail as a verdict about the app.
+		{"httpPath without a leading slash", func(p *previewv1.PreviewCheck) { p.Spec.HTTPPath = "health" }},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -89,15 +89,25 @@ type PreviewCheckSpec struct {
 	// Checks selects which checks run. They always run in the fixed order
 	// readiness, http, trivy, smoke regardless of the order listed here, one
 	// step per reconcile, fail-fast on the first Failed.
+	//
+	// Immutable: a check that has already passed is never re-run, so adding one
+	// mid-flight would publish a verdict over a set of checks that never all
+	// ran together, and removing one would retroactively narrow a verdict the
+	// caller may already have read.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=8
 	// +kubebuilder:default={readiness,http,trivy,smoke}
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="checks is immutable"
 	Checks []PreviewCheckName `json:"checks,omitempty"`
 
-	// HTTPPath is the path the http check requests on the app Service.
+	// HTTPPath is the path the http check requests on the app Service. It is
+	// concatenated onto the Service URL, so it must start with "/" — otherwise
+	// `health` silently becomes `http://navidrome...:4533health` and the probe
+	// fails with a verdict about the app.
 	// +optional
 	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^/`
 	// +kubebuilder:default="/"
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="httpPath is immutable"
 	HTTPPath string `json:"httpPath,omitempty"`
@@ -105,6 +115,11 @@ type PreviewCheckSpec struct {
 	// ExpectStatus lists the HTTP status codes the http check accepts. The
 	// default spans 2xx AND 3xx so an app behind OIDC, which answers the
 	// unauthenticated probe with a redirect to the IdP, still passes.
+	//
+	// Immutable, like httpPath: it is baked into the probe Job's environment at
+	// creation and re-read from the spec when the Job's result is interpreted.
+	// Editing it mid-flight would score a completed probe against an
+	// expectation it never ran under.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:MinItems=1
@@ -112,6 +127,7 @@ type PreviewCheckSpec struct {
 	// +kubebuilder:validation:items:Minimum=100
 	// +kubebuilder:validation:items:Maximum=599
 	// +kubebuilder:default={200,201,202,203,204,301,302,303,307,308}
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="expectStatus is immutable"
 	ExpectStatus []int32 `json:"expectStatus,omitempty"`
 
 	// TimeoutSeconds is the run deadline, measured from `status.startedAt`.

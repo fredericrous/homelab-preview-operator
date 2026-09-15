@@ -95,6 +95,11 @@ spec:
                   Checks selects which checks run. They always run in the fixed order
                   readiness, http, trivy, smoke regardless of the order listed here, one
                   step per reconcile, fail-fast on the first Failed.
+
+                  Immutable: a check that has already passed is never re-run, so adding one
+                  mid-flight would publish a verdict over a set of checks that never all
+                  ran together, and removing one would retroactively narrow a verdict the
+                  caller may already have read.
                 items:
                   description: PreviewCheckName is one of the checks the operator
                     knows how to run.
@@ -107,6 +112,9 @@ spec:
                 maxItems: 8
                 type: array
                 x-kubernetes-list-type: set
+                x-kubernetes-validations:
+                - message: checks is immutable
+                  rule: self == oldSelf
               expectStatus:
                 default:
                 - 200
@@ -123,6 +131,11 @@ spec:
                   ExpectStatus lists the HTTP status codes the http check accepts. The
                   default spans 2xx AND 3xx so an app behind OIDC, which answers the
                   unauthenticated probe with a redirect to the IdP, still passes.
+
+                  Immutable, like httpPath: it is baked into the probe Job's environment at
+                  creation and re-read from the spec when the Job's result is interpreted.
+                  Editing it mid-flight would score a completed probe against an
+                  expectation it never ran under.
                 items:
                   format: int32
                   maximum: 599
@@ -132,11 +145,18 @@ spec:
                 minItems: 1
                 type: array
                 x-kubernetes-list-type: set
+                x-kubernetes-validations:
+                - message: expectStatus is immutable
+                  rule: self == oldSelf
               httpPath:
                 default: /
-                description: HTTPPath is the path the http check requests on the app
-                  Service.
+                description: |-
+                  HTTPPath is the path the http check requests on the app Service. It is
+                  concatenated onto the Service URL, so it must start with "/" — otherwise
+                  `health` silently becomes `http://navidrome...:4533health` and the probe
+                  fails with a verdict about the app.
                 maxLength: 2048
+                pattern: ^/
                 type: string
                 x-kubernetes-validations:
                 - message: httpPath is immutable

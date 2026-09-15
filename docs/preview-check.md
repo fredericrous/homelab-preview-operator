@@ -68,8 +68,10 @@ Kustomization exists and is explicitly `Ready=False` at the deadline*, and
 `NamespaceGone` *when the namespace was observed and then vanished*.
 
 `Expired` reasons: `ScanMissing`, `EnrichmentUnavailable`, `QuotaExceeded`,
-`Timeout`, `NamespaceGone` *when the namespace never rendered at all*, and
-`KustomizationNotReady` when the gate simply never opened.
+`TargetUnresolved` (no HTTPRoute backend, no identifiable app Service, no
+resolvable image — a statement about the operator's reach, not about the
+change), `Timeout`, `NamespaceGone` *when the namespace never rendered at all*,
+and `KustomizationNotReady` when the gate simply never opened.
 
 Two consequences worth stating out loud:
 
@@ -201,9 +203,9 @@ mesh failure as an app failure.
 | `app` | — | **Validated** against the namespace's `preview-app` label; a mismatch is `Failed/AppMismatch`. Immutable. |
 | `image` | the previewed workload's container | Immutable. |
 | `revision` | — | `lastAppliedRevision` must end with it. Immutable. |
-| `checks` | `[readiness, http, trivy, smoke]` | Execution order is fixed regardless of how they are listed. |
-| `httpPath` | `/` | Immutable. |
-| `expectStatus` | 2xx + 3xx | An empty set would accept nothing; the CRD requires at least one. |
+| `checks` | `[readiness, http, trivy, smoke]` | Execution order is fixed regardless of how they are listed. Immutable. |
+| `httpPath` | `/` | Must start with `/`. Immutable. |
+| `expectStatus` | 2xx + 3xx | An empty set would accept nothing; the CRD requires at least one. Immutable. |
 | `timeoutSeconds` | `1800` | The run deadline. Mutable — extending a running check is legitimate. |
 | `ttlSeconds` | `7200` | Past it a non-terminal check becomes `Expired`; 24 h later the operator deletes the CR as a backstop. |
 | `thresholds.kevMax` | `0` | |

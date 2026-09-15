@@ -285,6 +285,7 @@ func (r *PreviewCheckReconciler) resolveNamespace(ctx context.Context, log logr.
 		res, uerr := r.publish(ctx, log, pc, statusUpdate{
 			phase:  previewv1.PreviewCheckFailed,
 			reason: previewv1.ReasonAppMismatch,
+			app:    app,
 			message: fmt.Sprintf("spec.app %q does not match the preview namespace's %s=%q",
 				spec.App, PreviewAppLabel, app),
 		})
@@ -337,7 +338,7 @@ func (r *PreviewCheckReconciler) checkGate(ctx context.Context, log logr.Logger,
 		if readyFalse || reason == previewv1.ReasonRevisionMismatch {
 			phase = previewv1.PreviewCheckFailed
 		}
-		res, uerr := r.publish(ctx, log, pc, statusUpdate{phase: phase, reason: reason, message: detail})
+		res, uerr := r.publish(ctx, log, pc, statusUpdate{phase: phase, reason: reason, app: env.app, message: detail})
 		return res, true, uerr
 	}
 
@@ -348,6 +349,7 @@ func (r *PreviewCheckReconciler) checkGate(ctx context.Context, log logr.Logger,
 	res, uerr := r.publish(ctx, log, pc, statusUpdate{
 		phase:   phase,
 		reason:  reason,
+		app:     env.app,
 		message: detail,
 		requeue: requeueLadder(env.elapsed),
 	})
@@ -403,6 +405,7 @@ func (r *PreviewCheckReconciler) runChecks(ctx context.Context, log logr.Logger,
 	return r.publish(ctx, log, pc, statusUpdate{
 		phase:   previewv1.PreviewCheckPassed,
 		reason:  previewv1.ReasonAllChecksPassed,
+		app:     env.app,
 		message: fmt.Sprintf("%d check(s) passed", len(pc.Status.Checks)),
 	})
 }
@@ -423,6 +426,21 @@ func (r *PreviewCheckReconciler) advanceCheck(ctx context.Context, log logr.Logg
 		// An RBAC gap, an API server error: a reconcile error, never a verdict.
 		// Backing off and retrying is right; telling the caller the change is
 		// bad because we could not look would not be.
+		//
+		// But a PERSISTENT error must still honour the run deadline. Returning
+		// the error forever leaves the CR Running until the TTL — four times the
+		// deadline — and a caller polling for a verdict waits two hours for one
+		// that was never coming. Past the deadline the honest answer is the same
+		// as for any other thing we could not look at: inconclusive.
+		if env.pastDeadline {
+			log.Error(err, "check errored past the run deadline, resolving as inconclusive", "check", name)
+			return r.publish(ctx, log, pc, statusUpdate{
+				phase:   previewv1.PreviewCheckExpired,
+				reason:  previewv1.ReasonTimeout,
+				app:     env.app,
+				message: fmt.Sprintf("%s check could not complete before the run deadline: %v", name, err),
+			})
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -452,7 +470,7 @@ func (r *PreviewCheckReconciler) advanceCheck(ctx context.Context, log logr.Logg
 	}
 	upsertCheck(pc, res)
 
-	u := statusUpdate{}
+	u := statusUpdate{app: env.app}
 	if !prevPhase.IsTerminal() && step.phase.IsTerminal() {
 		u.checkDone = &res
 	}
@@ -548,6 +566,10 @@ type statusUpdate struct {
 	message string
 	requeue time.Duration
 
+	// app is the resolved app name for the metric labels. Empty falls back to
+	// spec.app, then to "unknown".
+	app string
+
 	// checkDone, when set, is the check that has just reached a terminal phase
 	// for the first time. It is counted only once the status write lands.
 	checkDone *previewv1.PreviewCheckResult
@@ -595,7 +617,7 @@ func (r *PreviewCheckReconciler) publish(ctx context.Context, log logr.Logger, p
 	// Metrics and Events only AFTER the write lands. A conflict returns above
 	// without counting, and its retry re-reads a status that is still
 	// non-terminal — so the terminal verdict is counted exactly once.
-	app := metricApp(pc)
+	app := metricApp(pc, u.app)
 	if u.checkDone != nil {
 		previewCheckCheckTotal.WithLabelValues(app, string(u.checkDone.Name), string(u.checkDone.Phase)).Inc()
 	}
@@ -623,12 +645,14 @@ func (r *PreviewCheckReconciler) pendingOrExpired(ctx context.Context, log logr.
 		return r.publish(ctx, log, pc, statusUpdate{
 			phase:   previewv1.PreviewCheckExpired,
 			reason:  reason,
+			app:     env.app,
 			message: message,
 		})
 	}
 	return r.publish(ctx, log, pc, statusUpdate{
 		phase:   previewv1.PreviewCheckPending,
 		reason:  reason,
+		app:     env.app,
 		message: message,
 		requeue: requeueLadder(env.elapsed),
 	})
@@ -655,12 +679,16 @@ func (r *PreviewCheckReconciler) event(pc *previewv1.PreviewCheck, phase preview
 // the change was judged and judged bad (close the PR); Expired means the
 // machinery never managed to judge it (leave the PR open, cool down, escalate).
 // Reasons that describe OUR inability to look — no scan, no intelligence, no
-// quota, no time — are inconclusive; everything else is a verdict.
+// quota, no target to probe, no time — are inconclusive; everything else is a
+// verdict. TargetUnresolved belongs on that side: "this namespace has no
+// HTTPRoute backend and no non-infrastructure Service I can identify" is a
+// statement about the operator's reach, not about the change.
 func terminalPhaseFor(reason string) previewv1.PreviewCheckPhase {
 	switch reason {
 	case previewv1.ReasonScanMissing,
 		previewv1.ReasonEnrichmentUnavailable,
 		previewv1.ReasonQuotaExceeded,
+		previewv1.ReasonTargetUnresolved,
 		previewv1.ReasonTimeout:
 		return previewv1.PreviewCheckExpired
 	default:
@@ -745,13 +773,23 @@ func truncateMessage(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
-// metricApp keeps the cardinality of the metrics bounded and predictable. An
-// unset spec.app is reported as "unknown" rather than as an empty label.
-func metricApp(pc *previewv1.PreviewCheck) string {
-	if pc.Spec.App != "" {
+// metricApp keeps the cardinality of the metrics bounded and predictable.
+//
+// The resolved app — the preview namespace's `preview-app` label — is preferred
+// over spec.app, because the label is what every other decision in the
+// reconciler uses and spec.app is optional. spec.app is the fallback for the
+// transitions that happen before the namespace resolves (or that fail because
+// the two disagree), and "unknown" the last resort: an empty label value is
+// indistinguishable from a broken exporter on a dashboard.
+func metricApp(pc *previewv1.PreviewCheck, resolved string) string {
+	switch {
+	case resolved != "":
+		return resolved
+	case pc.Spec.App != "":
 		return pc.Spec.App
+	default:
+		return "unknown"
 	}
-	return "unknown"
 }
 
 // SetupWithManager wires the controller.

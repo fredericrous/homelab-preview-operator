@@ -323,10 +323,19 @@ func (r *PreviewCheckReconciler) checkSmoke(ctx context.Context, log logr.Logger
 	if err != nil {
 		return checkStep{}, err
 	}
-	previewURL := ""
-	if target.service != "" {
-		previewURL = serviceURL(target, env.nsName)
+	if target.service == "" {
+		// Running the Job with an empty PREVIEW_URL would make the test fail on
+		// a malformed URL and publish SmokeJobFailed — a VERDICT about the
+		// change — for what is really the operator failing to find a Service.
+		// Wait instead; TargetUnresolved resolves as inconclusive at the
+		// deadline.
+		return checkStep{
+			phase:   previewv1.CheckRunning,
+			reason:  previewv1.ReasonTargetUnresolved,
+			message: fmt.Sprintf("no HTTPRoute backend or app Service in %s to point PREVIEW_URL at", env.nsName),
+		}, nil
 	}
+	previewURL := serviceURL(target, env.nsName)
 
 	job, step, err := r.ensureJob(ctx, env, r.smokeJob(env, pc, cfg.Spec.SmokeTest, previewURL))
 	if err != nil || step != nil {

@@ -191,7 +191,14 @@ func (e *ClusterVisionEnricher) Lookup(ctx context.Context, cves []string) (Resp
 		first = false
 	}
 
-	e.memoPut(key, agg)
+	// Only a USABLE answer is memoised. A stale or empty-cache response is the
+	// endpoint saying "I do not know", and caching that for memoTTL turns a
+	// sixty-second cluster-vision blip into fifteen minutes of
+	// EnrichmentUnavailable — long enough to eat a thirty-minute run deadline
+	// and expire a preview the endpoint was ready to judge minutes earlier.
+	if agg.Usable() {
+		e.memoPut(key, agg)
+	}
 	return agg, nil
 }
 

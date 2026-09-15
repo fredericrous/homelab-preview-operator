@@ -267,3 +267,47 @@ func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+func TestLookup_UnusableAnswersAreNotMemoised(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Stale while cluster-vision is restarting, healthy once it is back.
+		if atomic.AddInt32(&calls, 1) == 1 {
+			writeJSON(w, Response{KEVTotal: 1200, Stale: true})
+			return
+		}
+		writeJSON(w, Response{KEVTotal: 1200, Results: []previewcheck.CVEIntel{{CVE: "CVE-1"}}})
+	}))
+	defer srv.Close()
+
+	e := New(srv.URL)
+	first, err := e.Lookup(context.Background(), []string{"CVE-1"})
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if first.Usable() {
+		t.Fatal("setup: the first answer should be unusable")
+	}
+
+	// Memoising "I do not know" for memoTTL would turn a sixty-second blip into
+	// fifteen minutes of EnrichmentUnavailable — long enough to eat a
+	// thirty-minute run deadline and expire a preview that was judgeable.
+	second, err := e.Lookup(context.Background(), []string{"CVE-1"})
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if !second.Usable() {
+		t.Error("a stale answer was served from the memo after the endpoint recovered")
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2: the unusable answer must not be cached", calls)
+	}
+
+	// The usable one IS memoised.
+	if _, err := e.Lookup(context.Background(), []string{"CVE-1"}); err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2: a usable answer must be memoised", calls)
+	}
+}
