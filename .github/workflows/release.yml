@@ -48,10 +48,17 @@ jobs:
           make controller-gen
           make envtest
 
+      - name: Provision envtest control plane
+        # `make envtest` only installs the setup-envtest TOOL. The binaries the
+        # envtest suite needs come from `setup-envtest use`; export the path it
+        # prints, exactly as pr.yml/main.yml do. The v0.9.0 release hardcoded
+        # bin/k8s/1.29.0-linux-amd64 without downloading it and failed on
+        # fork/exec.
+        run: |
+          echo "KUBEBUILDER_ASSETS=$(${{ github.workspace }}/bin/setup-envtest use 1.29.0 --bin-dir ${{ github.workspace }}/bin -p path)" >> "$GITHUB_ENV"
+
       - name: Run tests
         if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-go-test') }}
-        env:
-          KUBEBUILDER_ASSETS: "${{ github.workspace }}/bin/k8s/1.29.0-linux-amd64"
         run: |
           make test-unit
           make test-integration
