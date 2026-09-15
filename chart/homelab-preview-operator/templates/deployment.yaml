@@ -35,6 +35,7 @@ spec:
             - --preview-domain={{ .Values.config.previewDomain }}
             - --leader-elect={{ .Values.config.leaderElect }}
             - --health-probe-bind-address=:{{ .Values.health.port }}
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
             {{- if .Values.config.githubRepo }}
             - --github-repo={{ .Values.config.githubRepo }}
             {{- end }}
@@ -43,6 +44,12 @@ spec:
             {{- end }}
             {{- if .Values.config.gitApiBaseUrl }}
             - --git-api-base-url={{ .Values.config.gitApiBaseUrl }}
+            {{- end }}
+            {{- if .Values.config.probeImage }}
+            - --probe-image={{ .Values.config.probeImage }}
+            {{- end }}
+            {{- if .Values.config.cveEnrichmentUrl }}
+            - --cve-enrichment-url={{ .Values.config.cveEnrichmentUrl }}
             {{- end }}
           ports:
             - name: metrics

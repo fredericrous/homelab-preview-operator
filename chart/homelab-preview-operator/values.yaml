@@ -64,11 +64,34 @@ config:
   # Forge API base URL. Empty means https://api.github.com for github, and for
   # gitea the host of the Flux GitRepository the preview syncs from.
   gitApiBaseUrl: ""
+  # Image the PreviewCheck http probe Job runs inside the preview namespace.
+  # It only needs curl and a POSIX shell.
+  probeImage: "curlimages/curl:8.11.1"
+  # KEV/EPSS enrichment endpoint (cluster-vision POST /api/cve/enrichment).
+  # Empty makes the PreviewCheck trivy check FAIL CLOSED: it reports
+  # EnrichmentUnavailable rather than reading an unenriched scan as clean.
+  cveEnrichmentUrl: ""
 
 # Metrics configuration
 metrics:
   enabled: true
   port: 8080
+  # Service exposing the metrics port. Required by the ServiceMonitor below;
+  # before 0.9.0 the chart shipped neither and nothing scraped the operator.
+  service:
+    enabled: true
+    type: ClusterIP
+    annotations: {}
+  serviceMonitor:
+    # On by default: an operator nobody scrapes publishes its verdicts into the
+    # void. Turn it off on a cluster without the Prometheus operator CRDs.
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels for the Prometheus instance's serviceMonitorSelector.
+    labels: {}
+    relabelings: []
+    metricRelabelings: []
 
 # Health probes configuration
 health:
