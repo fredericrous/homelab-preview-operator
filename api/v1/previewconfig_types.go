@@ -61,6 +61,54 @@ type PreviewConfigSpec struct {
 	// replicate the cloned data to a PRODUCTION bucket.
 	// +optional
 	DeploymentPatch *DeploymentPatch `json:"deploymentPatch,omitempty"`
+
+	// SmokeTest is the app's own end-to-end assertion, run by a PreviewCheck as
+	// a Job inside the preview namespace once readiness, http and trivy have
+	// passed. Absent means the smoke check is Skipped, not failed.
+	//
+	// SECURITY: a PreviewConfig is always read from the PRODUCTION namespace
+	// `{app, app}` — never from the preview namespace — so a pull request cannot
+	// introduce or edit the smoke test that judges it. Combined with the
+	// deliberate absence of a `serviceAccount` field and the operator's
+	// unconditional `automountServiceAccountToken: false`, an attacker who lands
+	// a preview cannot reach the credentials reflected into preview namespaces
+	// (the repo-write `forgejo-git-token`, `litellm-secrets`) through this field.
+	// +optional
+	SmokeTest *SmokeTestConfig `json:"smokeTest,omitempty"`
+}
+
+// SmokeTestConfig is a per-app smoke test Job.
+type SmokeTestConfig struct {
+	// Image is the test image. It runs with no service account token, all
+	// capabilities dropped, no privilege escalation and the RuntimeDefault
+	// seccomp profile.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// Command overrides the image entrypoint.
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Command []string `json:"command,omitempty"`
+
+	// Args overrides the image arguments.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	Args []string `json:"args,omitempty"`
+
+	// Env sets extra environment variables. Plain strings only — no valueFrom,
+	// so a smoke test can never pull a Secret into its environment. The
+	// operator always injects PREVIEW_URL, PREVIEW_NAMESPACE, APP_NAME and
+	// PR_NUMBER on top of these.
+	// +optional
+	Env map[string]string `json:"env,omitempty"`
+
+	// TimeoutSeconds is the Job's activeDeadlineSeconds.
+	// +optional
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=3600
+	// +kubebuilder:default=300
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 }
 
 // DeploymentPatch strips containers from the previewed Deployment so a preview

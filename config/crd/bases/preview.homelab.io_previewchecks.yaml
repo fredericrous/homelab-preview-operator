@@ -1,0 +1,413 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: previewchecks.preview.homelab.io
+spec:
+  group: preview.homelab.io
+  names:
+    kind: PreviewCheck
+    listKind: PreviewCheckList
+    plural: previewchecks
+    shortNames:
+    - prevcheck
+    singular: previewcheck
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.app
+      name: App
+      type: string
+    - jsonPath: .spec.prNumber
+      name: PR
+      type: integer
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Succeeded")].reason
+      name: Reason
+      type: string
+    - jsonPath: .status.expiresAt
+      name: Expires
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PreviewCheck publishes a machine-readable verdict on one preview environment:
+          is the change in PR `spec.prNumber` safe to merge?
+
+          The CR deliberately lives OUTSIDE the preview namespace (by convention in
+          `preview-check`): the preview namespace does not exist yet when the PR opens,
+          and it is pruned when the PR closes — a verdict stored inside it would vanish
+          with the thing it judged, exactly when the caller needs to read it.
+
+          The spec is immutable per scalar field (not as a whole struct): a caller may
+          not re-point a running check at another PR, app, image or path, but the CRD
+          still accepts the defaulting the API server itself performs.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PreviewCheckSpec is the verdict request. Every scalar that selects WHAT is
+              judged carries `self == oldSelf`; the knobs that only say HOW long to wait
+              stay mutable so an operator can extend a running check.
+            properties:
+              app:
+                description: |-
+                  App is the previewed application. It is never trusted to SELECT a
+                  namespace or a PreviewConfig: the authoritative app name is the preview
+                  namespace's `preview-app` label, and a mismatch is a terminal
+                  Failed/AppMismatch. Leave it empty to accept whatever the namespace says.
+                maxLength: 253
+                type: string
+                x-kubernetes-validations:
+                - message: app is immutable
+                  rule: self == oldSelf
+              checks:
+                default:
+                - readiness
+                - http
+                - trivy
+                - smoke
+                description: |-
+                  Checks selects which checks run. They always run in the fixed order
+                  readiness, http, trivy, smoke regardless of the order listed here, one
+                  step per reconcile, fail-fast on the first Failed.
+
+                  Immutable: a check that has already passed is never re-run, so adding one
+                  mid-flight would publish a verdict over a set of checks that never all
+                  ran together, and removing one would retroactively narrow a verdict the
+                  caller may already have read.
+                items:
+                  description: PreviewCheckName is one of the checks the operator
+                    knows how to run.
+                  enum:
+                  - readiness
+                  - http
+                  - trivy
+                  - smoke
+                  type: string
+                maxItems: 8
+                type: array
+                x-kubernetes-list-type: set
+                x-kubernetes-validations:
+                - message: checks is immutable
+                  rule: self == oldSelf
+              expectStatus:
+                default:
+                - 200
+                - 201
+                - 202
+                - 203
+                - 204
+                - 301
+                - 302
+                - 303
+                - 307
+                - 308
+                description: |-
+                  ExpectStatus lists the HTTP status codes the http check accepts. The
+                  default spans 2xx AND 3xx so an app behind OIDC, which answers the
+                  unauthenticated probe with a redirect to the IdP, still passes.
+
+                  Immutable, like httpPath: it is baked into the probe Job's environment at
+                  creation and re-read from the spec when the Job's result is interpreted.
+                  Editing it mid-flight would score a completed probe against an
+                  expectation it never ran under.
+                items:
+                  format: int32
+                  maximum: 599
+                  minimum: 100
+                  type: integer
+                maxItems: 16
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+                x-kubernetes-validations:
+                - message: expectStatus is immutable
+                  rule: self == oldSelf
+              httpPath:
+                default: /
+                description: |-
+                  HTTPPath is the path the http check requests on the app Service. It is
+                  concatenated onto the Service URL, so it must start with "/" — otherwise
+                  `health` silently becomes `http://navidrome...:4533health` and the probe
+                  fails with a verdict about the app.
+                maxLength: 2048
+                pattern: ^/
+                type: string
+                x-kubernetes-validations:
+                - message: httpPath is immutable
+                  rule: self == oldSelf
+              image:
+                description: |-
+                  Image is the container image under test (`registry/repository:tag`). When
+                  empty the operator resolves it from the previewed workload's container.
+                maxLength: 253
+                type: string
+                x-kubernetes-validations:
+                - message: image is immutable
+                  rule: self == oldSelf
+              prNumber:
+                description: |-
+                  PRNumber is the pull request whose preview is judged. The preview
+                  namespace is `preview-pr-<prNumber>`.
+                format: int32
+                minimum: 1
+                type: integer
+                x-kubernetes-validations:
+                - message: prNumber is immutable
+                  rule: self == oldSelf
+              revision:
+                description: |-
+                  Revision, when set, gates every check on the preview Kustomization having
+                  applied it: `status.lastAppliedRevision` (`sha1:<sha>`) must end with this
+                  string. It is how a caller proves the preview runs ITS commit and not the
+                  previous push's.
+                maxLength: 253
+                type: string
+                x-kubernetes-validations:
+                - message: revision is immutable
+                  rule: self == oldSelf
+              thresholds:
+                default: {}
+                description: |-
+                  Thresholds bounds the trivy check. It is a value struct with a `{}`
+                  default on the parent so that the leaf defaults below materialise even
+                  when the field is omitted entirely; the leaves are pointers so an explicit
+                  `epssMaxPermille: 0` (zero tolerance) stays distinguishable from "unset".
+                properties:
+                  epssMaxPermille:
+                    default: 500
+                    description: |-
+                      EPSSMaxPermille is the highest EPSS score any single finding may carry,
+                      expressed in permille (500 == 0.500) so the CRD holds an integer rather
+                      than a float. It is an INCLUSIVE maximum: the operator computes
+                      `round(epss * 1000)` and fails only when that exceeds this value, so an
+                      EPSS of exactly 0.500 passes against the default.
+                    format: int32
+                    maximum: 1000
+                    minimum: 0
+                    type: integer
+                  kevMax:
+                    default: 0
+                    description: |-
+                      KEVMax is how many findings may appear in CISA's Known Exploited
+                      Vulnerabilities catalogue. The default, 0, is "none".
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              timeoutSeconds:
+                default: 1800
+                description: |-
+                  TimeoutSeconds is the run deadline, measured from `status.startedAt`.
+                  Reaching it resolves the check: a negative verdict is Failed, an
+                  inconclusive one Expired (see PreviewCheckStatus.Phase).
+                format: int32
+                maximum: 21600
+                minimum: 60
+                type: integer
+              ttlSeconds:
+                default: 7200
+                description: |-
+                  TTLSeconds is how long the CR itself stays meaningful. Past it a
+                  non-terminal check becomes Expired; 24 h later the operator deletes the CR
+                  as a backstop (the caller is expected to delete its own CRs).
+                format: int32
+                maximum: 604800
+                minimum: 60
+                type: integer
+            required:
+            - prNumber
+            type: object
+          status:
+            description: PreviewCheckStatus is the published verdict.
+            properties:
+              checks:
+                description: Checks is the per-check detail, upserted by name.
+                items:
+                  description: PreviewCheckResult is one check's outcome.
+                  properties:
+                    details:
+                      additionalProperties:
+                        type: string
+                      description: Details carries structured extras (matched image,
+                        CVE counts, HTTP status).
+                      type: object
+                    finishedAt:
+                      description: FinishedAt is when the check became terminal.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is human-readable detail (log tails are
+                        truncated into it).
+                      type: string
+                    name:
+                      description: Name is the check. It is the list map key, so it
+                        is never omitempty.
+                      enum:
+                      - readiness
+                      - http
+                      - trivy
+                      - smoke
+                      type: string
+                    phase:
+                      description: Phase is this check's phase.
+                      enum:
+                      - Pending
+                      - Running
+                      - Passed
+                      - Failed
+                      - Skipped
+                      type: string
+                    reason:
+                      description: Reason is a CamelCase machine-readable reason.
+                      type: string
+                    startedAt:
+                      description: StartedAt is when the check first ran.
+                      format: date-time
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              completedAt:
+                description: CompletedAt is when the phase became terminal.
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions carries the single "Succeeded" condition.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              expiresAt:
+                description: ExpiresAt is startedAt + ttlSeconds.
+                format: date-time
+                type: string
+              message:
+                description: Message is the latest human-readable detail.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the spec generation this status
+                  reflects.
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  Phase is the verdict. Passed, Failed and Expired are terminal and never
+                  flip back. See PreviewCheckPhase for what Failed vs Expired mean to a caller.
+                enum:
+                - Pending
+                - Running
+                - Passed
+                - Failed
+                - Expired
+                type: string
+              previewHost:
+                description: |-
+                  PreviewHost is the preview's external host, for humans. Nothing in the
+                  checks uses it: the edge listener demands a client certificate.
+                type: string
+              previewNamespace:
+                description: |-
+                  PreviewNamespace is the preview namespace, once it has been OBSERVED.
+                  Its emptiness is load-bearing: a namespace that never rendered is
+                  inconclusive, one that rendered and then vanished is a failure.
+                type: string
+              resolvedImage:
+                description: ResolvedImage is the image the trivy check actually judged.
+                type: string
+              startedAt:
+                description: |-
+                  StartedAt is when the operator first reconciled the check; the run
+                  deadline is measured from it.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

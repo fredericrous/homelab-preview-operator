@@ -1,3 +1,11 @@
+{{/*
+  Mirrors config/rbac/role.yaml, which controller-gen generates from the
+  +kubebuilder:rbac markers in internal/controller. That file is the source of
+  truth; regenerate it with `make manifests` and copy the rules block here.
+  There is deliberately no `deletecollection` on jobs: teardown lists and
+  deletes each check Job individually so it can carry
+  PropagationPolicy(Background), which DeleteAllOf cannot express.
+*/}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -5,158 +13,209 @@ metadata:
   labels:
     {{- include "homelab-preview-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups:
-      - ""
-    resources:
-      - configmaps
-      - secrets
-      - services
-    verbs:
-      - create
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - ""
-    resources:
-      - endpoints
-    verbs:
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - ""
-    resources:
-      - namespaces
-      - persistentvolumeclaims
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - apps
-    resources:
-      - deployments
-    verbs:
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - helm.toolkit.fluxcd.io
-    resources:
-      - helmreleases
-    verbs:
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - kustomize.toolkit.fluxcd.io
-    resources:
-      - kustomizations
-    verbs:
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - postgresql.cnpg.io
-    resources:
-      - clusters
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - preview.homelab.io
-    resources:
-      - migrationchecks
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - preview.homelab.io
-    resources:
-      - migrationchecks/finalizers
-    verbs:
-      - update
-  - apiGroups:
-      - preview.homelab.io
-    resources:
-      - migrationchecks/status
-    verbs:
-      - get
-      - patch
-      - update
-  - apiGroups:
-      - preview.homelab.io
-    resources:
-      - previewconfigs
-    verbs:
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - redis.redis.opstreelabs.in
-    resources:
-      - redis
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - security.homelab.io
-    resources:
-      - oidcclients
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - snapshot.storage.k8s.io
-    resources:
-      - volumesnapshotcontents
-      - volumesnapshots
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - source.toolkit.fluxcd.io
-    resources:
-      - gitrepositories
-    verbs:
-      - get
-      - list
-      - watch
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - secrets
+  - services
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - endpoints
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - aquasecurity.github.io
+  resources:
+  - vulnerabilityreports
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - httproutes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - helm.toolkit.fluxcd.io
+  resources:
+  - helmreleases
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kustomize.toolkit.fluxcd.io
+  resources:
+  - kustomizations
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - postgresql.cnpg.io
+  resources:
+  - clusters
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - preview.homelab.io
+  resources:
+  - migrationchecks
+  - previewchecks
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - preview.homelab.io
+  resources:
+  - migrationchecks/finalizers
+  - previewchecks/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - preview.homelab.io
+  resources:
+  - migrationchecks/status
+  - previewchecks/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - preview.homelab.io
+  resources:
+  - previewconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - redis.redis.opstreelabs.in
+  resources:
+  - redis
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - security.homelab.io
+  resources:
+  - oidcclients
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshotcontents
+  - volumesnapshots
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - source.toolkit.fluxcd.io
+  resources:
+  - gitrepositories
+  verbs:
+  - get
+  - list
+  - watch

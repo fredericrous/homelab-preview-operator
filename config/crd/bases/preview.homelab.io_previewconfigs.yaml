@@ -219,6 +219,59 @@ spec:
                 items:
                   type: string
                 type: array
+              smokeTest:
+                description: |-
+                  SmokeTest is the app's own end-to-end assertion, run by a PreviewCheck as
+                  a Job inside the preview namespace once readiness, http and trivy have
+                  passed. Absent means the smoke check is Skipped, not failed.
+
+                  SECURITY: a PreviewConfig is always read from the PRODUCTION namespace
+                  `{app, app}` — never from the preview namespace — so a pull request cannot
+                  introduce or edit the smoke test that judges it. Combined with the
+                  deliberate absence of a `serviceAccount` field and the operator's
+                  unconditional `automountServiceAccountToken: false`, an attacker who lands
+                  a preview cannot reach the credentials reflected into preview namespaces
+                  (the repo-write `forgejo-git-token`, `litellm-secrets`) through this field.
+                properties:
+                  args:
+                    description: Args overrides the image arguments.
+                    items:
+                      type: string
+                    maxItems: 32
+                    type: array
+                  command:
+                    description: Command overrides the image entrypoint.
+                    items:
+                      type: string
+                    maxItems: 16
+                    type: array
+                  env:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Env sets extra environment variables. Plain strings only — no valueFrom,
+                      so a smoke test can never pull a Secret into its environment. The
+                      operator always injects PREVIEW_URL, PREVIEW_NAMESPACE, APP_NAME and
+                      PR_NUMBER on top of these.
+                    type: object
+                  image:
+                    description: |-
+                      Image is the test image. It runs with no service account token, all
+                      capabilities dropped, no privilege escalation and the RuntimeDefault
+                      seccomp profile.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  timeoutSeconds:
+                    default: 300
+                    description: TimeoutSeconds is the Job's activeDeadlineSeconds.
+                    format: int32
+                    maximum: 3600
+                    minimum: 10
+                    type: integer
+                required:
+                - image
+                type: object
               storage:
                 description: Storage configuration for preview (S3/object storage)
                 properties:

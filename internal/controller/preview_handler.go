@@ -48,7 +48,7 @@ func (h *PreviewHandler) Process(ctx context.Context, ks *kustomizev1.Kustomizat
 	prNumber := strings.TrimPrefix(namespace, "preview-pr-")
 
 	// 1. Fetch preview.yaml from ConfigMap (populated by ResourceSet or init container)
-	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	config, err := h.fetchPreviewConfig(ctx, appName)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			h.log.Info("No preview.yaml found, skipping preview setup", "app", appName)
@@ -103,7 +103,7 @@ func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomize
 	prNumber := strings.TrimPrefix(namespace, "preview-pr-")
 
 	// Fetch PreviewConfig from production namespace
-	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	config, err := h.fetchPreviewConfig(ctx, appName)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			h.log.Info("No PreviewConfig found, unsuspending with strip patches only", "app", appName)
@@ -153,7 +153,7 @@ func (h *PreviewHandler) CreateInfrastructure(ctx context.Context, ks *kustomize
 	namespace := ks.Namespace
 	prNumber := strings.TrimPrefix(namespace, "preview-pr-")
 
-	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	config, err := h.fetchPreviewConfig(ctx, appName)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			h.log.Info("No PreviewConfig found, skipping infrastructure setup", "app", appName)
@@ -205,7 +205,7 @@ func (h *PreviewHandler) UpdateDBCredentialPatches(ctx context.Context, ks *kust
 	namespace := ks.Namespace
 	prNumber := strings.TrimPrefix(namespace, "preview-pr-")
 
-	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	config, err := h.fetchPreviewConfig(ctx, appName)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return h.setAnnotation(ctx, ks, CredentialsPatchedAnnotation, "true")
@@ -308,9 +308,17 @@ func generateRandomString(byteLen int) string {
 	return hex.EncodeToString(b)
 }
 
-// fetchPreviewConfig fetches the PreviewConfig CRD for the app
-// It first checks the preview namespace, then falls back to the production namespace
-func (h *PreviewHandler) fetchPreviewConfig(ctx context.Context, namespace, appName string) (*v1.PreviewConfig, error) {
+// fetchPreviewConfig fetches the app's PreviewConfig from the PRODUCTION
+// namespace — always `{Namespace: appName, Name: appName}`, never the preview
+// namespace.
+//
+// That is a security property, not an implementation detail: the preview
+// namespace is rendered from the pull request's own tree, so reading the config
+// from there would let a PR rewrite the rules that judge it (strip patches,
+// shared services, and since v0.9.0 the smoke test the PreviewCheck runs). The
+// dead `namespace` parameter that used to suggest a preview-first lookup, and
+// the doc comment that described one, are gone.
+func (h *PreviewHandler) fetchPreviewConfig(ctx context.Context, appName string) (*v1.PreviewConfig, error) {
 	config := &v1.PreviewConfig{}
 	name := types.NamespacedName{Namespace: appName, Name: appName}
 	if err := h.client.Get(ctx, name, config); err != nil {
@@ -1037,7 +1045,7 @@ func (h *PreviewHandler) buildHelmValuePatches(namespace, appName, prNumber stri
 func (h *PreviewHandler) ensureHelmReleaseValues(ctx context.Context, namespace, appName string) (bool, error) {
 	prNumber := strings.TrimPrefix(namespace, "preview-pr-")
 
-	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	config, err := h.fetchPreviewConfig(ctx, appName)
 	if err != nil {
 		// No PreviewConfig for this app is a legitimate "nothing to do".
 		// Anything else (API server down, RBAC) must surface, or a real
@@ -1238,7 +1246,7 @@ func hashPreviewConfigSpec(config *v1.PreviewConfig) string {
 // PreviewConfigHash fetches the app's PreviewConfig and returns its spec hash.
 // A missing PreviewConfig hashes as the empty spec (consistent with prepare).
 func (h *PreviewHandler) PreviewConfigHash(ctx context.Context, namespace, appName string) (string, error) {
-	config, err := h.fetchPreviewConfig(ctx, namespace, appName)
+	config, err := h.fetchPreviewConfig(ctx, appName)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			config = &v1.PreviewConfig{}
