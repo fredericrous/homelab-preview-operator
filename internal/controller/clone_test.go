@@ -93,3 +93,99 @@ func TestBuildCloneClusterSpec_CarriesSourceStorage(t *testing.T) {
 		t.Errorf("storage = %v, want the source class and size verbatim", storage)
 	}
 }
+
+// The clone is disposable and its volume is a copy-on-write child whose first
+// writes are copy-ups krbd drains at under one per second; durability settings
+// only make bring-up wait on that path. None of these are in CNPG's fixed
+// parameter list, so the operator accepts them.
+func TestBuildCloneClusterSpec_TradesDurabilityForBringUp(t *testing.T) {
+	spec := buildCloneClusterSpec("vs", "30Gi", "sc", "", nil)
+	params := spec["postgresql"].(map[string]interface{})["parameters"].(map[string]interface{})
+	for _, p := range []string{"fsync", "synchronous_commit", "full_page_writes"} {
+		if params[p] != "off" {
+			t.Errorf("parameters[%s] = %v, want off", p, params[p])
+		}
+	}
+	// CNPG rejects a spec that names one of its fixed parameters.
+	for _, fixed := range []string{"wal_level", "hot_standby", "archive_mode", "listen_addresses", "port"} {
+		if _, set := params[fixed]; set {
+			t.Errorf("parameters sets fixed parameter %s, which CNPG refuses", fixed)
+		}
+	}
+}
+
+func sourceCluster(instances, ready int64, synchronous map[string]interface{}, minSync int64) *unstructured.Unstructured {
+	c := &unstructured.Unstructured{Object: map[string]interface{}{
+		"spec":   map[string]interface{}{"instances": instances, "postgresql": map[string]interface{}{}},
+		"status": map[string]interface{}{"readyInstances": ready},
+	}}
+	if synchronous != nil {
+		c.Object["spec"].(map[string]interface{})["postgresql"].(map[string]interface{})["synchronous"] = synchronous
+	}
+	if minSync > 0 {
+		c.Object["spec"].(map[string]interface{})["minSyncReplicas"] = minSync
+	}
+	return c
+}
+
+func TestColdSnapshotEligible(t *testing.T) {
+	cases := []struct {
+		name    string
+		cluster *unstructured.Unstructured
+		want    bool
+	}{
+		// CNPG's prefer-standby silently picks the primary when there is no
+		// standby, and fencing the primary is an outage: a single instance must
+		// take the raw path.
+		{"single instance", sourceCluster(1, 1, nil, 0), false},
+		// A declared standby that is not ready is not fenceable either.
+		{"standby not ready", sourceCluster(2, 1, nil, 0), false},
+		{"two ready, async", sourceCluster(2, 2, nil, 0), true},
+		{"two ready, synchronous preferred", sourceCluster(2, 2, map[string]interface{}{"method": "any", "number": int64(1), "dataDurability": "preferred"}, 0), true},
+		// dataDurability defaults to required: fencing the only standby would
+		// block every commit on the primary for the length of the snapshot.
+		{"synchronous, durability unset", sourceCluster(2, 2, map[string]interface{}{"method": "any", "number": int64(1)}, 0), false},
+		{"synchronous required", sourceCluster(2, 2, map[string]interface{}{"method": "any", "number": int64(1), "dataDurability": "required"}, 0), false},
+		{"legacy minSyncReplicas", sourceCluster(3, 3, nil, 1), false},
+		{"three ready, async", sourceCluster(3, 3, nil, 0), true},
+	}
+	for _, tc := range cases {
+		got, why := coldSnapshotEligible(tc.cluster)
+		if got != tc.want {
+			t.Errorf("%s: eligible = %v (%s), want %v", tc.name, got, why, tc.want)
+		}
+		if why == "" {
+			t.Errorf("%s: no reason given", tc.name)
+		}
+	}
+}
+
+func TestBuildColdBackup_IsOfflineAndTargetsAStandby(t *testing.T) {
+	b := buildColdBackup("postgres", "migcheck-warm-postgres-apps", "postgres-apps", map[string]string{"k": "v"})
+	if b.GetKind() != "Backup" || b.GroupVersionKind().Group != "postgresql.cnpg.io" {
+		t.Fatalf("kind = %s/%s, want postgresql.cnpg.io/Backup", b.GroupVersionKind().Group, b.GetKind())
+	}
+	if b.GetNamespace() != "postgres" || b.GetName() != "migcheck-warm-postgres-apps" {
+		t.Errorf("name = %s/%s; CNPG names the PGDATA VolumeSnapshot after the Backup, so this must be the warm snapshot name", b.GetNamespace(), b.GetName())
+	}
+	if b.GetLabels()["k"] != "v" {
+		t.Errorf("labels not carried: %v", b.GetLabels())
+	}
+	if got, _, _ := unstructured.NestedString(b.Object, "spec", "cluster", "name"); got != "postgres-apps" {
+		t.Errorf("spec.cluster.name = %q", got)
+	}
+	if got, _, _ := unstructured.NestedString(b.Object, "spec", "method"); got != "volumeSnapshot" {
+		t.Errorf("spec.method = %q, want volumeSnapshot", got)
+	}
+	// online:false is what makes the data directory a clean shutdown with
+	// nothing to replay; it must override the source cluster's online default.
+	online, found, _ := unstructured.NestedBool(b.Object, "spec", "online")
+	if !found || online {
+		t.Errorf("spec.online = %v (found=%v), want an explicit false", online, found)
+	}
+	if got, _, _ := unstructured.NestedString(b.Object, "spec", "target"); got != "prefer-standby" {
+		t.Errorf("spec.target = %q, want prefer-standby", got)
+	}
+	// Same deep-copy requirement as the cluster spec: only JSON-compatible values.
+	b.DeepCopy()
+}

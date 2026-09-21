@@ -119,6 +119,16 @@ rules:
 - apiGroups:
   - postgresql.cnpg.io
   resources:
+  - backups
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - postgresql.cnpg.io
+  resources:
   - clusters
   verbs:
   - create

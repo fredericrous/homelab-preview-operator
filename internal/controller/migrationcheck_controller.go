@@ -46,6 +46,9 @@ type MigrationCheckReconciler struct {
 // +kubebuilder:rbac:groups=preview.homelab.io,resources=migrationchecks/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
+// The warm source snapshot is taken as a CNPG cold Backup of a standby (clone.go);
+// the Backup is created, watched and replaced when stale — never updated.
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=backups,verbs=get;list;watch;create;delete
 
 // Reconcile drives a MigrationCheck through Pending -> Provisioning -> Ready, and
 // tears everything down on deletion or TTL expiry.
