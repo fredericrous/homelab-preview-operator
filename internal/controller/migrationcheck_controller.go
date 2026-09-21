@@ -382,14 +382,10 @@ func (r *MigrationCheckReconciler) checkProbe(ctx context.Context, log logr.Logg
 			joinDetail(fmt.Sprintf("%s answered %s against the prod-data clone", mc.Spec.Probe.Image, probePath(mc)), tail))
 	case previewcheck.JobFailed:
 		tail := r.tailProbe(ctx, log, mc.Namespace, name)
-		if reason == "DeadlineExceeded" {
-			// The Job's own deadline is the probe timeout plus pull grace: the
-			// app never answered in its budget. Judged, not inconclusive: the
-			// clone was ready and the image ran.
-			if pull := r.probeImagePullFailure(ctx, mc.Namespace, name); pull != "" {
-				return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, previewv1.MigrationReasonImageUnavailable,
-					joinDetail("probe image could not be pulled: "+pull, tail))
-			}
+		if why, detail := r.probeWaitingFailure(ctx, mc.Namespace, name); why != "" {
+			// The pod never got to run the app: an artifact or configuration
+			// miss, published as never-judged.
+			return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, why, joinDetail("probe pod never started: "+detail, tail))
 		}
 		head := fmt.Sprintf("%s did not answer %s against the prod-data clone", mc.Spec.Probe.Image, probePath(mc))
 		if reason != "" {
@@ -399,12 +395,11 @@ func (r *MigrationCheckReconciler) checkProbe(ctx context.Context, log logr.Logg
 	}
 
 	// Still running.
-	if pull := r.probeImagePullFailure(ctx, mc.Namespace, name); pull != "" {
+	if why, detail := r.probeWaitingFailure(ctx, mc.Namespace, name); why != "" {
 		if r.probeDeadlinePassed(mc) {
-			return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, previewv1.MigrationReasonImageUnavailable,
-				"probe image could not be pulled: "+pull)
+			return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, why, "probe pod never started: "+detail)
 		}
-		if msg := "waiting for the probe image: " + pull; mc.Status.Message != msg {
+		if msg := "waiting for the probe pod: " + detail; mc.Status.Message != msg {
 			mc.Status.Message = msg
 			if err := r.Status().Update(ctx, mc); err != nil {
 				return requeueOnConflict(err)

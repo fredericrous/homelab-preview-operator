@@ -33,6 +33,12 @@ const (
 	// waits before calling time: it covers pulling the app image, which the
 	// in-Job poll cannot see.
 	probePullGrace = 3 * time.Minute
+
+	// probeJobSlack is how much later than the reconciler's own deadline the
+	// Job's activeDeadlineSeconds fires. The reconciler must judge first: when
+	// the Job controller hits its deadline it deletes the pod, and with it the
+	// log tail that explains the verdict.
+	probeJobSlack = 2 * time.Minute
 )
 
 // migrationProbeScript polls the app on localhost until it answers 2xx (and,
@@ -97,9 +103,10 @@ func (r *MigrationCheckReconciler) migrationProbeJob(mc *previewv1.MigrationChec
 		path = "/"
 	}
 	timeout := probeTimeout(p)
-	// The Job's own deadline includes room to pull the image; the poll inside
-	// only counts from container start.
-	deadline := int64((timeout + probePullGrace).Seconds())
+	// The Job's own deadline includes room to pull the image and lands after
+	// the reconciler's (timeout + probePullGrace), so the pod is still there to
+	// be tailed when the verdict is written.
+	deadline := int64((timeout + probePullGrace + probeJobSlack).Seconds())
 	backoff := int32(0)
 	ttl := checkJobTTL
 	automount := false
@@ -128,6 +135,11 @@ func (r *MigrationCheckReconciler) migrationProbeJob(mc *previewv1.MigrationChec
 		AllowPrivilegeEscalation: ptr(false),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+	if p.RunAsUser != nil {
+		// A numeric uid lets the kubelet prove non-root for images whose USER is
+		// a name (which it otherwise refuses under runAsNonRoot).
+		containerSC.RunAsUser = ptr(*p.RunAsUser)
 	}
 	probeSC := &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr(false),
@@ -259,14 +271,16 @@ func (r *MigrationCheckReconciler) ensureProbeJob(ctx context.Context, desired *
 	return desired, nil, nil
 }
 
-// probeImagePullFailure reports the image-pull waiting reason of the probe
-// Job's pod, if that is why it is not running. It is what lets "the PR image
-// was never pushed" resolve as Expired/ImageUnavailable rather than as a
-// verdict about the migrations.
-func (r *MigrationCheckReconciler) probeImagePullFailure(ctx context.Context, namespace, jobName string) string {
+// probeWaitingFailure reports why the probe Job's pod is stuck before its
+// containers run, if it is: an image that cannot be pulled (reason
+// ImageUnavailable) or a container the kubelet refuses to create
+// (PodNotStarted — e.g. runAsNonRoot with a non-numeric image user). Both are
+// misses about the artifact or the configuration, never a verdict about the
+// migrations, so the caller publishes them as Expired.
+func (r *MigrationCheckReconciler) probeWaitingFailure(ctx context.Context, namespace, jobName string) (reason, detail string) {
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(namespace), client.MatchingLabels{"job-name": jobName}); err != nil {
-		return ""
+		return "", ""
 	}
 	for i := range pods.Items {
 		statuses := append([]corev1.ContainerStatus{}, pods.Items[i].Status.InitContainerStatuses...)
@@ -275,13 +289,16 @@ func (r *MigrationCheckReconciler) probeImagePullFailure(ctx context.Context, na
 			if cs.State.Waiting == nil {
 				continue
 			}
-			switch cs.State.Waiting.Reason {
+			w := cs.State.Waiting
+			switch w.Reason {
 			case "ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull":
-				return fmt.Sprintf("%s: %s", cs.State.Waiting.Reason, cs.State.Waiting.Message)
+				return previewv1.MigrationReasonImageUnavailable, fmt.Sprintf("%s: %s", w.Reason, w.Message)
+			case "CreateContainerConfigError", "CreateContainerError":
+				return previewv1.MigrationReasonPodNotStarted, fmt.Sprintf("%s (%s): %s", w.Reason, cs.Name, w.Message)
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // deleteProbeJob removes the probe Job with background propagation. Jobs

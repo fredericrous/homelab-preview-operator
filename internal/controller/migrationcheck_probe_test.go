@@ -182,6 +182,7 @@ func readyCheck(mutate ...func(*previewv1.MigrationCheck)) *previewv1.MigrationC
 			Probe: &previewv1.MigrationProbe{
 				Image: mcImage, Port: 3000, ReadyPath: "/health/ready", Expect: `"status":"ready"`,
 				Env: map[string]string{"SMTP_HOST": "localhost", "SESSION_SECRET": "dummy"}, TimeoutSeconds: 600,
+				RunAsUser: ptr(int64(1001)),
 			},
 			Report: &previewv1.MigrationReport{Provider: "github", Repo: "fredericrous/duro-app", Revision: "abc1234def5678abc1234def5678abc1234def56", Name: "Migration check (prod-data clone)"},
 		},
@@ -268,8 +269,14 @@ func TestMigrationCheck_StartProbeCreatesJob(t *testing.T) {
 	if len(pod.Containers) != 1 || pod.Containers[0].Image != "curlimages/curl:8.11.1" {
 		t.Fatalf("probe container = %+v", pod.Containers)
 	}
-	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != int64((600*time.Second+probePullGrace).Seconds()) {
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != int64((600*time.Second+probePullGrace+probeJobSlack).Seconds()) {
 		t.Fatalf("activeDeadlineSeconds = %v", job.Spec.ActiveDeadlineSeconds)
+	}
+	if got := *job.Spec.ActiveDeadlineSeconds; got <= int64((600*time.Second + probePullGrace).Seconds()) {
+		t.Fatalf("the Job deadline (%d) must land after the reconciler's, or the pod is gone before the log tail", got)
+	}
+	if pod.InitContainers[0].SecurityContext.RunAsUser == nil || *pod.InitContainers[0].SecurityContext.RunAsUser != 1001 {
+		t.Fatalf("runAsUser not propagated to the app container: %+v", pod.InitContainers[0].SecurityContext)
 	}
 	if run := f.reporter.last(); run.Status != "in_progress" || run.HeadSHA != got.Spec.Report.Revision || run.Name != "Migration check (prod-data clone)" {
 		t.Fatalf("expected an in_progress check run on the head sha, got %+v", run)
@@ -381,6 +388,35 @@ func TestMigrationCheck_ImagePullBackOffExpiresNotFails(t *testing.T) {
 	got := f.get()
 	if got.Status.Phase != previewv1.MigrationCheckExpired || got.Status.Reason != previewv1.MigrationReasonImageUnavailable {
 		t.Fatalf("phase/reason = %s/%s, want Expired/ImageUnavailable", got.Status.Phase, got.Status.Reason)
+	}
+	if run := f.reporter.last(); run.Conclusion != "timed_out" {
+		t.Fatalf("conclusion = %q", run.Conclusion)
+	}
+}
+
+func TestMigrationCheck_CreateContainerConfigErrorExpiresNotFails(t *testing.T) {
+	f := newMCFixture(t, jobsNamespace(true), readyCheck())
+	f.reconcile()
+	jobName := f.get().Status.ProbeJobName
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName + "-x2", Namespace: mcNS, Labels: map[string]string{"job-name": jobName}},
+		Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+			Name: "app",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+				Reason: "CreateContainerConfigError", Message: "container has runAsNonRoot and image has non-numeric user (appuser)"}},
+		}}},
+	}
+	if err := f.cl.Create(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.SetTime(f.clock.Now().Add(600*time.Second + probePullGrace + time.Minute))
+	f.reconcile()
+	got := f.get()
+	if got.Status.Phase != previewv1.MigrationCheckExpired || got.Status.Reason != previewv1.MigrationReasonPodNotStarted {
+		t.Fatalf("phase/reason = %s/%s, want Expired/PodNotStarted", got.Status.Phase, got.Status.Reason)
+	}
+	if !strings.Contains(got.Status.Message, "non-numeric user") {
+		t.Fatalf("message should carry the kubelet's reason: %q", got.Status.Message)
 	}
 	if run := f.reporter.last(); run.Conclusion != "timed_out" {
 		t.Fatalf("conclusion = %q", run.Conclusion)

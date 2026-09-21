@@ -45,6 +45,7 @@ spec:
     readyPath: /health/ready
     expect: '"status":"ready"'
     timeoutSeconds: 600
+    runAsUser: 1001   # required when the image sets USER by name
     env:
       SESSION_SECRET: ci-dummy
   report:
@@ -82,7 +83,10 @@ land there too, which is how a failing migration names itself on the PR.
 | `Expired` | never judged: clone did not settle within `readyTimeoutSeconds`, image could not be pulled, probe ran out of time, or the TTL left no budget | `timed_out` |
 
 `status.reason` carries the machine-readable cause (`CloneNotReady`,
-`ProbeFailed`, `ImageUnavailable`, `DeadlineExceeded`, `TTLTooShort`, …).
+`ProbeFailed`, `ImageUnavailable`, `PodNotStarted`, `DeadlineExceeded`,
+`TTLTooShort`, …). `PodNotStarted` is the kubelet refusing a container, most
+often "image has non-numeric user" under `runAsNonRoot`: set `probe.runAsUser`
+to the image's uid (or make the Dockerfile's `USER` numeric).
 Deleting a CR before a verdict marks its check run `cancelled`.
 
 ### Security model

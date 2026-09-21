@@ -122,6 +122,15 @@ type MigrationProbe struct {
 	// +kubebuilder:validation:MaxLength=256
 	Expect string `json:"expect,omitempty"`
 
+	// RunAsUser is the numeric uid the app container runs as. Required when the
+	// image sets its USER by name: the pod runs with runAsNonRoot, and the
+	// kubelet refuses to start a container whose image user it cannot prove is
+	// non-root ("image has non-numeric user"). Must match the image's user for
+	// files the app owns.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	RunAsUser *int64 `json:"runAsUser,omitempty"`
+
 	// Env is extra plain-value environment for the app container. There is no
 	// valueFrom on purpose: a CR must not be able to name a Secret.
 	// +optional
@@ -206,6 +215,10 @@ const (
 	MigrationReasonProbePassed      = "ProbePassed"
 	MigrationReasonProbeFailed      = "ProbeFailed"
 	MigrationReasonImageUnavailable = "ImageUnavailable"
+	// MigrationReasonPodNotStarted: the kubelet refused to start a container
+	// (CreateContainerConfigError, e.g. a non-numeric image user under
+	// runAsNonRoot). A configuration miss, never a verdict on the migrations.
+	MigrationReasonPodNotStarted    = "PodNotStarted"
 	MigrationReasonDeadlineExceeded = "DeadlineExceeded"
 	MigrationReasonTTLTooShort      = "TTLTooShort"
 )
