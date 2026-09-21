@@ -190,6 +190,7 @@ func readyCheck(mutate ...func(*previewv1.MigrationCheck)) *previewv1.MigrationC
 			Phase: previewv1.MigrationCheckReady, Reason: previewv1.MigrationReasonReady,
 			ConnectionSecretName: mcName + "-db", ConnectionSecretNamespace: mcNS,
 			CloneNamespace: "migration-check-duro-0e8c0a3b1c2d",
+			CloneImage:     "ghcr.io/cloudnative-pg/postgresql:17",
 			StartedAt:      &metav1.Time{Time: created},
 			ExpiresAt:      &metav1.Time{Time: created.Add(time.Hour)},
 		},
@@ -237,14 +238,25 @@ func TestMigrationCheck_StartProbeCreatesJob(t *testing.T) {
 	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
 		t.Fatal("probe pod must not mount a service account token")
 	}
-	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Image != mcImage {
-		t.Fatalf("app sidecar missing or wrong image: %+v", pod.InitContainers)
+	if len(pod.InitContainers) != 2 || pod.InitContainers[0].Name != "wait-db" || pod.InitContainers[1].Image != mcImage {
+		t.Fatalf("init containers must be [wait-db, app]: %+v", pod.InitContainers)
 	}
-	if pod.InitContainers[0].RestartPolicy == nil || *pod.InitContainers[0].RestartPolicy != corev1.ContainerRestartPolicyAlways {
+	waitDB := pod.InitContainers[0]
+	if waitDB.Image != "ghcr.io/cloudnative-pg/postgresql:17" || waitDB.RestartPolicy != nil {
+		t.Fatalf("wait-db must run pg_isready from the clone's image as a regular init container: %+v", waitDB)
+	}
+	if waitDB.SecurityContext.RunAsUser == nil || *waitDB.SecurityContext.RunAsUser != 26 {
+		t.Fatalf("wait-db must run as the postgres uid: %+v", waitDB.SecurityContext)
+	}
+	if len(waitDB.Env) == 0 || waitDB.Env[0].Name != "DATABASE_URL" || waitDB.Env[0].ValueFrom == nil || waitDB.Env[0].ValueFrom.SecretKeyRef.Name != mcName+"-db" {
+		t.Fatalf("wait-db must read DATABASE_URL from the connection Secret: %+v", waitDB.Env)
+	}
+	app := pod.InitContainers[1]
+	if app.RestartPolicy == nil || *app.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatal("app container must be a native sidecar (restartPolicy Always)")
 	}
 	dbRefs := 0
-	for _, e := range pod.InitContainers[0].Env {
+	for _, e := range app.Env {
 		if e.Name == "DATABASE_URL" {
 			dbRefs++
 			if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil || e.ValueFrom.SecretKeyRef.Name != mcName+"-db" {
@@ -257,7 +269,7 @@ func TestMigrationCheck_StartProbeCreatesJob(t *testing.T) {
 	}
 	// spec env is sorted and plain
 	names := []string{}
-	for _, e := range pod.InitContainers[0].Env[1:] {
+	for _, e := range app.Env[1:] {
 		names = append(names, e.Name)
 		if e.ValueFrom != nil {
 			t.Fatalf("spec env %s must be a plain value", e.Name)
@@ -269,14 +281,14 @@ func TestMigrationCheck_StartProbeCreatesJob(t *testing.T) {
 	if len(pod.Containers) != 1 || pod.Containers[0].Image != "curlimages/curl:8.11.1" {
 		t.Fatalf("probe container = %+v", pod.Containers)
 	}
-	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != int64((600*time.Second+probePullGrace+probeJobSlack).Seconds()) {
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != int64((probeBudget(got.Spec.Probe)+probeJobSlack).Seconds()) {
 		t.Fatalf("activeDeadlineSeconds = %v", job.Spec.ActiveDeadlineSeconds)
 	}
-	if got := *job.Spec.ActiveDeadlineSeconds; got <= int64((600*time.Second + probePullGrace).Seconds()) {
+	if got := *job.Spec.ActiveDeadlineSeconds; got <= int64(probeBudget(f.get().Spec.Probe).Seconds()) {
 		t.Fatalf("the Job deadline (%d) must land after the reconciler's, or the pod is gone before the log tail", got)
 	}
-	if pod.InitContainers[0].SecurityContext.RunAsUser == nil || *pod.InitContainers[0].SecurityContext.RunAsUser != 1001 {
-		t.Fatalf("runAsUser not propagated to the app container: %+v", pod.InitContainers[0].SecurityContext)
+	if app.SecurityContext.RunAsUser == nil || *app.SecurityContext.RunAsUser != 1001 {
+		t.Fatalf("runAsUser not propagated to the app container: %+v", app.SecurityContext)
 	}
 	if run := f.reporter.last(); run.Status != "in_progress" || run.HeadSHA != got.Spec.Report.Revision || run.Name != "Migration check (prod-data clone)" {
 		t.Fatalf("expected an in_progress check run on the head sha, got %+v", run)
@@ -350,7 +362,7 @@ func TestMigrationCheck_ProbeFailsFails(t *testing.T) {
 func TestMigrationCheck_ProbeDeadlineExpires(t *testing.T) {
 	f := newMCFixture(t, jobsNamespace(true), readyCheck())
 	f.reconcile()
-	f.clock.SetTime(f.clock.Now().Add(600*time.Second + probePullGrace + time.Minute))
+	f.clock.SetTime(f.clock.Now().Add(probeBudget(f.get().Spec.Probe) + time.Minute))
 	f.reconcile()
 
 	got := f.get()
@@ -383,7 +395,7 @@ func TestMigrationCheck_ImagePullBackOffExpiresNotFails(t *testing.T) {
 		t.Fatalf("phase=%s message=%q", got.Status.Phase, got.Status.Message)
 	}
 
-	f.clock.SetTime(f.clock.Now().Add(600*time.Second + probePullGrace + time.Minute))
+	f.clock.SetTime(f.clock.Now().Add(probeBudget(f.get().Spec.Probe) + time.Minute))
 	f.reconcile()
 	got := f.get()
 	if got.Status.Phase != previewv1.MigrationCheckExpired || got.Status.Reason != previewv1.MigrationReasonImageUnavailable {
@@ -409,7 +421,7 @@ func TestMigrationCheck_CreateContainerConfigErrorExpiresNotFails(t *testing.T) 
 	if err := f.cl.Create(context.Background(), pod); err != nil {
 		t.Fatal(err)
 	}
-	f.clock.SetTime(f.clock.Now().Add(600*time.Second + probePullGrace + time.Minute))
+	f.clock.SetTime(f.clock.Now().Add(probeBudget(f.get().Spec.Probe) + time.Minute))
 	f.reconcile()
 	got := f.get()
 	if got.Status.Phase != previewv1.MigrationCheckExpired || got.Status.Reason != previewv1.MigrationReasonPodNotStarted {
@@ -445,7 +457,7 @@ func TestMigrationCheck_CloneNotReadyExpires(t *testing.T) {
 
 func TestMigrationCheck_TTLTooShortExpires(t *testing.T) {
 	mc := readyCheck(func(mc *previewv1.MigrationCheck) {
-		mc.Spec.TTLSeconds = 900 // created 10 min before the clock: 5 min left, probe needs 13
+		mc.Spec.TTLSeconds = 900 // created 10 min before the clock: 5 min left, probe needs 18
 	})
 	f := newMCFixture(t, jobsNamespace(true), mc)
 	f.reconcile()
