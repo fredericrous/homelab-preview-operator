@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,11 +16,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	previewv1 "github.com/fredericrous/homelab-preview-operator/api/v1"
+	"github.com/fredericrous/homelab-preview-operator/internal/previewcheck"
 )
 
 const migrationCheckFinalizer = "preview.homelab.io/migration-check"
@@ -32,13 +35,35 @@ const migrationCheckFinalizer = "preview.homelab.io/migration-check"
 // check past this window pays the one-off snapshot cost, then it's warm again.
 const warmSnapshotMaxAge = 12 * time.Hour
 
+// maxMigrationMessage bounds what status.message (which can carry a log tail)
+// puts into etcd.
+const maxMigrationMessage = 4096
+
 // MigrationCheckReconciler provisions a throwaway, snapshot-based CNPG clone of a
-// production database so CI can run an app's migrations against real data before
-// merge, then tears it down on delete / TTL.
+// production database so an app's migrations can run against real data before
+// merge, optionally runs the app against it (spec.probe), publishes the verdict
+// (spec.report), and tears everything down on delete / TTL.
+//
+// Like PreviewCheck it watches nothing but its own CR and Secrets: the probe
+// Job is polled by RequeueAfter, never through a Job informer (cmd/main.go
+// disables the Job/Pod cache for the whole manager).
 type MigrationCheckReconciler struct {
 	client.Client
 	Log    logr.Logger
 	Scheme *runtime.Scheme
+
+	// Clock is injectable so tests can cross a deadline instantly. Nil means
+	// the wall clock.
+	Clock clock.PassiveClock
+
+	// Logs tails the probe Job for detail. Nil means no detail, never no verdict.
+	Logs LogTailer
+
+	// ProbeImage is the curl image the probe container runs.
+	ProbeImage string
+
+	// Reporter publishes check runs. Nil disables reporting.
+	Reporter CheckRunReporter
 }
 
 // +kubebuilder:rbac:groups=preview.homelab.io,resources=migrationchecks,verbs=get;list;watch;create;update;patch;delete
@@ -46,12 +71,19 @@ type MigrationCheckReconciler struct {
 // +kubebuilder:rbac:groups=preview.homelab.io,resources=migrationchecks/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
+// The connection Secret is created on Ready and deleted on teardown.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// The probe Job and its pod (logs, image-pull state).
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // The warm source snapshot is taken as a CNPG cold Backup of a standby (clone.go);
 // the Backup is created, watched and replaced when stale — never updated.
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=backups,verbs=get;list;watch;create;delete
 
-// Reconcile drives a MigrationCheck through Pending -> Provisioning -> Ready, and
-// tears everything down on deletion or TTL expiry.
+// Reconcile drives a MigrationCheck through Pending -> Provisioning -> Ready and,
+// with a probe, on through Running to Passed/Failed/Expired; it tears everything
+// down on deletion or TTL expiry.
 func (r *MigrationCheckReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("migrationcheck", req.NamespacedName)
 
@@ -63,6 +95,7 @@ func (r *MigrationCheckReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Deletion: run teardown via finalizer.
 	if !mc.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(mc, migrationCheckFinalizer) {
+			r.reportCancelled(ctx, mc)
 			if err := r.teardown(ctx, log, mc); err != nil {
 				log.Error(err, "teardown failed, will retry")
 				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
@@ -96,19 +129,33 @@ func (r *MigrationCheckReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	case previewv1.MigrationCheckProvisioning:
 		return r.checkReady(ctx, log, mc)
 	case previewv1.MigrationCheckReady:
-		// Re-queue near TTL expiry so the clone is GC'd even if CI never deletes it.
-		_, remaining := r.ttlExpired(mc)
-		return ctrl.Result{RequeueAfter: remaining}, nil
-	default: // Failed
+		if mc.Spec.Probe == nil {
+			// Push flow: re-queue near TTL expiry so the clone is GC'd even if
+			// CI never deletes it.
+			_, remaining := r.ttlExpired(mc)
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+		return r.startProbe(ctx, log, mc)
+	case previewv1.MigrationCheckRunning:
+		return r.checkProbe(ctx, log, mc)
+	default: // Passed, Failed, Expired
+		if err := r.publishReport(ctx, mc); err != nil {
+			log.V(1).Info("check run report pending", "error", err.Error())
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 }
 
 // provision creates the throwaway namespace and kicks off the snapshot clone.
 func (r *MigrationCheckReconciler) provision(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck) (ctrl.Result, error) {
+	if mc.Status.StartedAt == nil {
+		mc.Status.StartedAt = &metav1.Time{Time: r.now()}
+	}
+
 	srcCluster, srcNS, _, err := r.resolveSource(ctx, mc)
 	if err != nil {
-		return r.fail(ctx, log, mc, err)
+		return r.fail(ctx, log, mc, previewv1.MigrationReasonCloneFailed, err)
 	}
 
 	id := migCheckID(mc)
@@ -151,17 +198,19 @@ func (r *MigrationCheckReconciler) provision(ctx context.Context, log logr.Logge
 		warmMaxAge:       warmSnapshotMaxAge,
 	}
 	if err := h.cloneCNPGFromSnapshot(ctx, clone); err != nil {
-		return r.fail(ctx, log, mc, fmt.Errorf("clone from snapshot: %w", err))
+		return r.fail(ctx, log, mc, previewv1.MigrationReasonCloneFailed, fmt.Errorf("clone from snapshot: %w", err))
 	}
 
 	expires := mc.CreationTimestamp.Add(r.ttl(mc))
 	mc.Status.Phase = previewv1.MigrationCheckProvisioning
+	mc.Status.Reason = previewv1.MigrationReasonProvisioning
 	mc.Status.Message = "clone provisioning"
 	mc.Status.CloneNamespace = cloneNS
 	mc.Status.ExpiresAt = &metav1.Time{Time: expires}
 	if err := r.Status().Update(ctx, mc); err != nil {
 		return requeueOnConflict(err)
 	}
+	r.reportBestEffort(ctx, log, mc)
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
@@ -172,49 +221,60 @@ func (r *MigrationCheckReconciler) provision(ctx context.Context, log logr.Logge
 // Service has a ready endpoint (CNPG only adds the primary to -rw once its
 // readiness probe — a real connection check — passes) AND the superuser secret
 // exists. Only then does CI get a connection string (#1).
+//
+// With a probe configured the wait is bounded by spec.readyTimeoutSeconds: a
+// clone that never settles is an infrastructure miss, published as Expired so
+// the PR is never told its migrations are broken.
 func (r *MigrationCheckReconciler) checkReady(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck) (ctrl.Result, error) {
 	id := migCheckID(mc)
 	cloneNS := mc.Status.CloneNamespace
 	clusterName := fmt.Sprintf("migcheck-%s", id)
 
+	notReady := func(state string) (ctrl.Result, error) {
+		if mc.Spec.Probe != nil && r.readyDeadlinePassed(mc) {
+			return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, previewv1.MigrationReasonCloneNotReady,
+				fmt.Sprintf("clone did not settle within %s (%s)", r.readyTimeout(mc), state))
+		}
+		log.V(1).Info("clone not ready yet", "state", state)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	cluster := &unstructured.Unstructured{}
 	cluster.SetGroupVersionKind(schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster"})
 	if err := r.Get(ctx, types.NamespacedName{Namespace: cloneNS, Name: clusterName}, cluster); err != nil {
 		if errors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			return notReady("cluster not found")
 		}
 		return ctrl.Result{}, err
 	}
 	if settled, state := cnpgClusterSettled(cluster); !settled {
-		log.V(1).Info("clone not ready yet", "state", state)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return notReady(state)
 	}
 
 	// -rw endpoints ready == primary accepting connections.
 	eps := &corev1.Endpoints{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: cloneNS, Name: clusterName + "-rw"}, eps); err != nil {
 		if errors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			return notReady("-rw endpoints not found")
 		}
 		return ctrl.Result{}, err
 	}
 	if !endpointsReady(eps) {
-		log.V(1).Info("clone -rw endpoints not ready yet")
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return notReady("-rw endpoints not ready")
 	}
 
 	// Superuser secret (CNPG creates <cluster>-superuser with enableSuperuserAccess).
 	suSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: cloneNS, Name: clusterName + "-superuser"}, suSecret); err != nil {
 		if errors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			return notReady("superuser secret not found")
 		}
 		return ctrl.Result{}, err
 	}
 	user := string(suSecret.Data["username"])
 	pass := string(suSecret.Data["password"])
 	if user == "" || pass == "" {
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return notReady("superuser secret empty")
 	}
 
 	dbName := mc.Spec.DatabaseName
@@ -245,6 +305,7 @@ func (r *MigrationCheckReconciler) checkReady(ctx context.Context, log logr.Logg
 	}
 
 	mc.Status.Phase = previewv1.MigrationCheckReady
+	mc.Status.Reason = previewv1.MigrationReasonReady
 	mc.Status.Message = "clone ready"
 	mc.Status.ConnectionSecretName = secretName
 	mc.Status.ConnectionSecretNamespace = mc.Namespace
@@ -252,15 +313,160 @@ func (r *MigrationCheckReconciler) checkReady(ctx context.Context, log logr.Logg
 		return requeueOnConflict(err)
 	}
 	log.Info("MigrationCheck ready", "secret", secretName, "cloneNamespace", cloneNS)
+	if mc.Spec.Probe != nil {
+		return ctrl.Result{Requeue: true}, nil
+	}
 	_, remaining := r.ttlExpired(mc)
 	return ctrl.Result{RequeueAfter: remaining}, nil
 }
 
-// teardown removes everything this individual clone created. The throwaway
-// namespace deletion reaps the CNPG cluster, PVCs, restore VolumeSnapshot and
-// superuser secret; the per-run cluster-scoped VolumeSnapshotContent (Retain, so
-// deleting it never touches the underlying CSI snapshot) and the result Secret in
-// the CR namespace are deleted explicitly (#5). All deletes are idempotent.
+// startProbe creates the probe Job for a Ready clone and moves to Running.
+func (r *MigrationCheckReconciler) startProbe(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck) (ctrl.Result, error) {
+	// The probe needs its whole budget (plus image pull) before the TTL reaps
+	// the clone underneath it; a CR created with too little TTL left is an
+	// operator-side misconfiguration, not a verdict.
+	_, remaining := r.ttlExpired(mc)
+	if need := probeTimeout(mc.Spec.Probe) + probePullGrace; remaining < need {
+		return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, previewv1.MigrationReasonTTLTooShort,
+			fmt.Sprintf("%s left before TTL, the probe needs %s", remaining.Round(time.Second), need))
+	}
+
+	id := migCheckID(mc)
+	job, wait, err := r.ensureProbeJob(ctx, r.migrationProbeJob(mc, id))
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if wait != nil {
+		mc.Status.Message = wait.message
+		if uerr := r.Status().Update(ctx, mc); uerr != nil {
+			return requeueOnConflict(uerr)
+		}
+		return ctrl.Result{RequeueAfter: wait.requeue}, nil
+	}
+
+	mc.Status.Phase = previewv1.MigrationCheckRunning
+	mc.Status.Reason = previewv1.MigrationReasonProbeRunning
+	mc.Status.Message = fmt.Sprintf("running %s against the clone", mc.Spec.Probe.Image)
+	mc.Status.ProbeJobName = job.Name
+	if mc.Status.ProbeStartedAt == nil {
+		mc.Status.ProbeStartedAt = &metav1.Time{Time: r.now()}
+	}
+	if err := r.Status().Update(ctx, mc); err != nil {
+		return requeueOnConflict(err)
+	}
+	log.Info("migration probe started", "job", job.Name, "image", mc.Spec.Probe.Image)
+	r.reportBestEffort(ctx, log, mc)
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// checkProbe polls the probe Job and turns its outcome into the verdict.
+func (r *MigrationCheckReconciler) checkProbe(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck) (ctrl.Result, error) {
+	name := mc.Status.ProbeJobName
+	if name == "" {
+		name = migrationProbeJobName(migCheckID(mc))
+	}
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: mc.Namespace, Name: name}, job); err != nil {
+		if errors.IsNotFound(err) {
+			return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, previewv1.MigrationReasonDeadlineExceeded,
+				"probe job disappeared before a verdict")
+		}
+		return ctrl.Result{}, err
+	}
+
+	phase, reason, message := previewcheck.JobOutcome(job)
+	switch phase {
+	case previewcheck.JobSucceeded:
+		tail := r.tailProbe(ctx, log, mc.Namespace, name)
+		return r.finish(ctx, log, mc, previewv1.MigrationCheckPassed, previewv1.MigrationReasonProbePassed,
+			joinDetail(fmt.Sprintf("%s answered %s against the prod-data clone", mc.Spec.Probe.Image, probePath(mc)), tail))
+	case previewcheck.JobFailed:
+		tail := r.tailProbe(ctx, log, mc.Namespace, name)
+		if reason == "DeadlineExceeded" {
+			// The Job's own deadline is the probe timeout plus pull grace: the
+			// app never answered in its budget. Judged, not inconclusive: the
+			// clone was ready and the image ran.
+			if pull := r.probeImagePullFailure(ctx, mc.Namespace, name); pull != "" {
+				return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, previewv1.MigrationReasonImageUnavailable,
+					joinDetail("probe image could not be pulled: "+pull, tail))
+			}
+		}
+		head := fmt.Sprintf("%s did not answer %s against the prod-data clone", mc.Spec.Probe.Image, probePath(mc))
+		if reason != "" {
+			head += fmt.Sprintf(" (%s: %s)", reason, message)
+		}
+		return r.finish(ctx, log, mc, previewv1.MigrationCheckFailed, previewv1.MigrationReasonProbeFailed, joinDetail(head, tail))
+	}
+
+	// Still running.
+	if pull := r.probeImagePullFailure(ctx, mc.Namespace, name); pull != "" {
+		if r.probeDeadlinePassed(mc) {
+			return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, previewv1.MigrationReasonImageUnavailable,
+				"probe image could not be pulled: "+pull)
+		}
+		if msg := "waiting for the probe image: " + pull; mc.Status.Message != msg {
+			mc.Status.Message = msg
+			if err := r.Status().Update(ctx, mc); err != nil {
+				return requeueOnConflict(err)
+			}
+		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+	if r.probeDeadlinePassed(mc) {
+		tail := r.tailProbe(ctx, log, mc.Namespace, name)
+		return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, previewv1.MigrationReasonDeadlineExceeded,
+			joinDetail(fmt.Sprintf("probe still running %s after start", r.now().Sub(mc.Status.ProbeStartedAt.Time).Round(time.Second)), tail))
+	}
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// finish writes a terminal phase, then publishes it. The verdict is durable
+// before anything talks to the forge; a report failure only delays the report.
+func (r *MigrationCheckReconciler) finish(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck, phase previewv1.MigrationCheckPhase, reason, message string) (ctrl.Result, error) {
+	mc.Status.Phase = phase
+	mc.Status.Reason = reason
+	mc.Status.Message = truncateMigrationMessage(message)
+	mc.Status.CompletedAt = &metav1.Time{Time: r.now()}
+	if err := r.Status().Update(ctx, mc); err != nil {
+		return requeueOnConflict(err)
+	}
+	log.Info("MigrationCheck finished", "phase", phase, "reason", reason)
+	if err := r.publishReport(ctx, mc); err != nil {
+		log.V(1).Info("check run report pending", "error", err.Error())
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+// reportBestEffort publishes a non-terminal phase (the "in progress" spinner)
+// without letting a forge hiccup change the reconcile outcome.
+func (r *MigrationCheckReconciler) reportBestEffort(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck) {
+	if err := r.publishReport(ctx, mc); err != nil {
+		log.V(1).Info("check run report pending", "error", err.Error())
+	}
+}
+
+// tailProbe fetches the probe Job's log tail. Best-effort by design: a missing
+// log is missing DETAIL, never a different verdict.
+func (r *MigrationCheckReconciler) tailProbe(ctx context.Context, log logr.Logger, namespace, name string) string {
+	if r.Logs == nil {
+		return ""
+	}
+	tail, err := r.Logs.TailJobLogs(ctx, namespace, name, logTailBytes)
+	if err != nil {
+		log.V(1).Info("could not tail probe job logs", "job", name, "error", err.Error())
+		return ""
+	}
+	return previewcheck.TruncateLogTail(strings.TrimSpace(tail), logTailBytes)
+}
+
+// teardown removes everything this individual clone created. The probe Job goes
+// first (background propagation, so its pods stop talking to the database); the
+// throwaway namespace deletion reaps the CNPG cluster, PVCs, restore
+// VolumeSnapshot and superuser secret; the per-run cluster-scoped
+// VolumeSnapshotContent (Retain, so deleting it never touches the underlying
+// CSI snapshot) and the result Secret in the CR namespace are deleted
+// explicitly (#5). All deletes are idempotent.
 //
 // The shared "warm" source snapshot (migcheck-warm-<cluster>) is deliberately NOT
 // deleted here — it's reused by subsequent checks and only recycled when a later
@@ -269,6 +475,12 @@ func (r *MigrationCheckReconciler) checkReady(ctx context.Context, log logr.Logg
 // back-compat with any in-flight non-warm clone.
 func (r *MigrationCheckReconciler) teardown(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck) error {
 	id := migCheckID(mc)
+
+	if mc.Spec.Probe != nil || mc.Status.ProbeJobName != "" {
+		if err := r.deleteProbeJob(ctx, mc); err != nil {
+			return err
+		}
+	}
 
 	// Result secret (CR namespace).
 	if mc.Status.ConnectionSecretName != "" {
@@ -331,6 +543,13 @@ func (r *MigrationCheckReconciler) resolveSource(ctx context.Context, mc *previe
 	return cluster, ns, db, nil
 }
 
+func (r *MigrationCheckReconciler) now() time.Time {
+	if r.Clock == nil {
+		return time.Now()
+	}
+	return r.Clock.Now()
+}
+
 func (r *MigrationCheckReconciler) ttl(mc *previewv1.MigrationCheck) time.Duration {
 	secs := mc.Spec.TTLSeconds
 	if secs <= 0 {
@@ -342,21 +561,61 @@ func (r *MigrationCheckReconciler) ttl(mc *previewv1.MigrationCheck) time.Durati
 // ttlExpired reports whether the TTL has passed and, if not, the remaining duration.
 func (r *MigrationCheckReconciler) ttlExpired(mc *previewv1.MigrationCheck) (bool, time.Duration) {
 	deadline := mc.CreationTimestamp.Add(r.ttl(mc))
-	remaining := time.Until(deadline)
+	remaining := deadline.Sub(r.now())
 	if remaining <= 0 {
 		return true, 0
 	}
 	return false, remaining
 }
 
-func (r *MigrationCheckReconciler) fail(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck, err error) (ctrl.Result, error) {
-	log.Error(err, "MigrationCheck failed")
-	mc.Status.Phase = previewv1.MigrationCheckFailed
-	mc.Status.Message = err.Error()
-	if uerr := r.Status().Update(ctx, mc); uerr != nil {
-		return requeueOnConflict(uerr)
+// readyTimeout is the clone bring-up budget when a probe is configured.
+func (r *MigrationCheckReconciler) readyTimeout(mc *previewv1.MigrationCheck) time.Duration {
+	secs := mc.Spec.ReadyTimeoutSeconds
+	if secs <= 0 {
+		secs = 1500
 	}
-	return ctrl.Result{}, nil
+	return time.Duration(secs) * time.Second
+}
+
+func (r *MigrationCheckReconciler) readyDeadlinePassed(mc *previewv1.MigrationCheck) bool {
+	start := mc.CreationTimestamp.Time
+	if mc.Status.StartedAt != nil {
+		start = mc.Status.StartedAt.Time
+	}
+	return r.now().After(start.Add(r.readyTimeout(mc)))
+}
+
+func (r *MigrationCheckReconciler) probeDeadlinePassed(mc *previewv1.MigrationCheck) bool {
+	if mc.Status.ProbeStartedAt == nil {
+		return false
+	}
+	return r.now().After(mc.Status.ProbeStartedAt.Add(probeTimeout(mc.Spec.Probe) + probePullGrace))
+}
+
+func probePath(mc *previewv1.MigrationCheck) string {
+	if mc.Spec.Probe == nil || mc.Spec.Probe.ReadyPath == "" {
+		return "/"
+	}
+	return mc.Spec.Probe.ReadyPath
+}
+
+func truncateMigrationMessage(s string) string {
+	if len(s) <= maxMigrationMessage {
+		return s
+	}
+	return previewcheck.TruncateLogTail(s, maxMigrationMessage)
+}
+
+// fail records a provisioning error. Without a probe this is the push flow's
+// terminal Failed (its CI loop fails fast on it); with a probe the change was
+// never judged, so it is Expired.
+func (r *MigrationCheckReconciler) fail(ctx context.Context, log logr.Logger, mc *previewv1.MigrationCheck, reason string, err error) (ctrl.Result, error) {
+	log.Error(err, "MigrationCheck failed")
+	phase := previewv1.MigrationCheckFailed
+	if mc.Spec.Probe != nil {
+		phase = previewv1.MigrationCheckExpired
+	}
+	return r.finish(ctx, log, mc, phase, reason, err.Error())
 }
 
 // SetupWithManager wires the controller.

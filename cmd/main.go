@@ -3,10 +3,12 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -24,6 +26,7 @@ import (
 	previewv1 "github.com/fredericrous/homelab-preview-operator/api/v1"
 	"github.com/fredericrous/homelab-preview-operator/internal/controller"
 	"github.com/fredericrous/homelab-preview-operator/internal/enrichment"
+	"github.com/fredericrous/homelab-preview-operator/internal/githubapp"
 )
 
 var (
@@ -48,6 +51,9 @@ func main() {
 	var gitAPIBaseURL string
 	var probeImage string
 	var cveEnrichmentURL string
+	var githubAppSecret string
+	var githubAPIBaseURL string
+	var checkRunRepoPrefix string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -66,6 +72,15 @@ func main() {
 	flag.StringVar(&cveEnrichmentURL, "cve-enrichment-url", "",
 		"KEV/EPSS enrichment endpoint (cluster-vision POST /api/cve/enrichment). "+
 			"Empty makes the PreviewCheck trivy check fail closed rather than read an unenriched scan as clean.")
+	flag.StringVar(&githubAppSecret, "github-app-secret", "",
+		"namespace/name of the Secret holding the GitHub App credentials (githubAppID, "+
+			"githubAppInstallationID, githubAppPrivateKey) used to publish MigrationCheck verdicts as check runs. "+
+			"Empty disables reporting. The Secret is chosen here, never by a CR.")
+	flag.StringVar(&githubAPIBaseURL, "github-api-base-url", githubapp.DefaultBaseURL,
+		"GitHub API base URL for check runs.")
+	flag.StringVar(&checkRunRepoPrefix, "check-run-repo-prefix", "",
+		"Only MigrationChecks whose spec.report.repo starts with this prefix (e.g. \"owner/\") may publish check runs. "+
+			"Empty allows any repository the App is installed on.")
 
 	opts := zap.Options{
 		Development: true,
@@ -121,18 +136,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.MigrationCheckReconciler{
-		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("MigrationCheck"),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "MigrationCheck")
-		os.Exit(1)
-	}
-
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		setupLog.Error(err, "unable to build a clientset for reading check job logs")
+		os.Exit(1)
+	}
+
+	// A nil reporter is meaningful: MigrationCheck verdicts stay in status only.
+	var reporter controller.CheckRunReporter
+	if githubAppSecret != "" {
+		ns, name, ok := strings.Cut(githubAppSecret, "/")
+		if !ok || ns == "" || name == "" {
+			setupLog.Error(nil, "--github-app-secret must be namespace/name", "value", githubAppSecret)
+			os.Exit(1)
+		}
+		reporter = &controller.GitHubAppReporter{
+			Reader:     mgr.GetClient(),
+			SecretRef:  types.NamespacedName{Namespace: ns, Name: name},
+			API:        githubapp.NewClient(githubAPIBaseURL, nil, nil),
+			RepoPrefix: checkRunRepoPrefix,
+		}
+	} else {
+		setupLog.Info("no --github-app-secret configured; MigrationCheck verdicts will not be reported as check runs")
+	}
+
+	if err = (&controller.MigrationCheckReconciler{
+		Client:     mgr.GetClient(),
+		Log:        ctrl.Log.WithName("controllers").WithName("MigrationCheck"),
+		Scheme:     mgr.GetScheme(),
+		Clock:      clock.RealClock{},
+		Logs:       controller.NewPodLogTailer(clientset),
+		ProbeImage: probeImage,
+		Reporter:   reporter,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "MigrationCheck")
 		os.Exit(1)
 	}
 
