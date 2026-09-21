@@ -9,6 +9,16 @@ KUBE_VERSION ?= 1.29.0
 # ENVTEST binary versions
 ENVTEST_K8S_VERSION = $(KUBE_VERSION)
 
+# Pin the Go toolchain to go.mod's `go` line for every target below. This is
+# Go's equivalent of a virtualenv: with GOTOOLCHAIN set to an exact version the
+# go command downloads that release once (into the module cache) and uses it,
+# whatever `go` on PATH happens to be. Without the pin a NEWER local go is used
+# silently — `go 1.25.13` in go.mod only forbids OLDER ones — so a workstation
+# on 1.27 tested code that CI (setup-go, go-version-file: go.mod) builds on
+# 1.25. Exported, so it also reaches the tools installed with `go install`.
+GO_VERSION := $(shell awk '/^go /{print $$2}' go.mod)
+export GOTOOLCHAIN := go$(GO_VERSION)
+
 # Get platform info
 GOOS := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
@@ -33,6 +43,9 @@ fmt: ## Run go fmt against code.
 
 vet: ## Run go vet against code.
 	go vet ./...
+
+lint: golangci-lint ## Run golangci-lint at the pinned version, exactly as CI does.
+	$(GOLANGCI_LINT) run --timeout 5m
 
 test: manifests generate fmt vet envtest ## Run tests.
 	@echo "Setting up envtest binaries..."
@@ -96,9 +109,15 @@ $(LOCALBIN):
 ## Tool Binaries
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
+GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
 CONTROLLER_TOOLS_VERSION ?= v0.19.0
+# The one place the linter version is pinned; .github/workflows/pr.yml runs
+# `make lint` so CI and a workstation cannot drift apart. A golangci-lint
+# release is built against one Go minor and must not lag go.mod's: when the
+# `go` line moves to a new minor, bump this alongside it.
+GOLANGCI_LINT_VERSION ?= v2.4.0
 
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
@@ -108,4 +127,9 @@ envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 
-.PHONY: all help manifests generate fmt vet test test-unit test-integration test-coverage tidy build run docker-build docker-push docker-buildx install uninstall deploy undeploy controller-gen envtest
+golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary (the release binary, as its authors recommend over `go install`).
+$(GOLANGCI_LINT): $(LOCALBIN)
+	test -s $(GOLANGCI_LINT) && $(GOLANGCI_LINT) --version | grep -q "version $(GOLANGCI_LINT_VERSION:v%=%) " || \
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(LOCALBIN) $(GOLANGCI_LINT_VERSION)
+
+.PHONY: all help manifests generate fmt vet lint test test-unit test-integration test-coverage tidy build run docker-build docker-push docker-buildx install uninstall deploy undeploy controller-gen envtest golangci-lint
