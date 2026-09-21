@@ -383,7 +383,7 @@ func (h *PreviewHandler) waitForBackupCompleted(ctx context.Context, namespace, 
 				return nil
 			case "failed":
 				reason, _, _ := unstructured.NestedString(b.Object, "status", "error")
-				return fmt.Errorf("Backup %s/%s failed: %s", namespace, name, reason)
+				return fmt.Errorf("backup %s/%s failed: %s", namespace, name, reason)
 			}
 		}
 	}
