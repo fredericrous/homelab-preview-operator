@@ -50,7 +50,7 @@ lint: golangci-lint ## Run golangci-lint at the pinned version, exactly as CI do
 test: manifests generate fmt vet envtest ## Run tests.
 	@echo "Setting up envtest binaries..."
 	@test -d $(LOCALBIN) || mkdir -p $(LOCALBIN)
-	@test -f $(ENVTEST) || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	@test -f $(ENVTEST) || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
 	KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./... -coverprofile cover.out
 
 test-unit: fmt vet ## Run unit tests only.
@@ -118,6 +118,12 @@ CONTROLLER_TOOLS_VERSION ?= v0.19.0
 # release is built against one Go minor and must not lag go.mod's: when the
 # `go` line moves to a new minor, bump this alongside it.
 GOLANGCI_LINT_VERSION ?= v2.4.0
+# setup-envtest tracks controller-runtime's minor (go.mod has v0.19.0), and
+# only its v0.24+ tags exist as tags — those need Go 1.26, which is what
+# `@latest` resolved to the day the toolchain pin above stopped go from quietly
+# fetching a newer toolchain just to build a test helper. The release-0.19
+# branch head, pinned as its pseudo-version so the build is reproducible.
+SETUP_ENVTEST_VERSION ?= v0.0.0-20250308055145-5fe7bb3edc86
 
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
@@ -125,7 +131,7 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
-	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
 
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary (the release binary, as its authors recommend over `go install`).
 $(GOLANGCI_LINT): $(LOCALBIN)
