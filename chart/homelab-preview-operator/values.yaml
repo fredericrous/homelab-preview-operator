@@ -71,6 +71,18 @@ config:
   # Empty makes the PreviewCheck trivy check FAIL CLOSED: it reports
   # EnrichmentUnavailable rather than reading an unenriched scan as clean.
   cveEnrichmentUrl: ""
+  # namespace/name of the Secret holding GitHub App credentials (Flux's
+  # `flux create secret githubapp` keys: githubAppID, githubAppInstallationID,
+  # githubAppPrivateKey) used to publish MigrationCheck verdicts as check runs.
+  # Empty disables reporting. The operator chooses this Secret; a
+  # MigrationCheck cannot point it at another one.
+  githubAppSecret: ""
+  # GitHub API base URL for check runs.
+  githubApiBaseUrl: ""
+  # Only MigrationChecks whose spec.report.repo starts with this prefix
+  # (e.g. "owner/") may publish check runs. Empty allows any repository the
+  # App is installed on.
+  checkRunRepoPrefix: ""
 
 # Metrics configuration
 metrics:

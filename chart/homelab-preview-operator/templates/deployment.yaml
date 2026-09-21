@@ -51,6 +51,15 @@ spec:
             {{- if .Values.config.cveEnrichmentUrl }}
             - --cve-enrichment-url={{ .Values.config.cveEnrichmentUrl }}
             {{- end }}
+            {{- if .Values.config.githubAppSecret }}
+            - --github-app-secret={{ .Values.config.githubAppSecret }}
+            {{- end }}
+            {{- if .Values.config.githubApiBaseUrl }}
+            - --github-api-base-url={{ .Values.config.githubApiBaseUrl }}
+            {{- end }}
+            {{- if .Values.config.checkRunRepoPrefix }}
+            - --check-run-repo-prefix={{ .Values.config.checkRunRepoPrefix }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
