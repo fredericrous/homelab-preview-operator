@@ -145,12 +145,12 @@ func (c *Client) InstallationToken(ctx context.Context, cr Credentials) (string,
 	}
 
 	url := fmt.Sprintf("%s/app/installations/%s/access_tokens", c.baseURL, cr.InstallationID)
-	resp, body, err := c.do(ctx, http.MethodPost, url, "Bearer "+jwt, nil)
+	status, body, err := c.do(ctx, http.MethodPost, url, "Bearer "+jwt, nil)
 	if err != nil {
 		return "", fmt.Errorf("github: installation token: %w", err)
 	}
-	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("github: installation token: %w", statusError(resp.StatusCode, body))
+	if status != http.StatusCreated {
+		return "", fmt.Errorf("github: installation token: %w", statusError(status, body))
 	}
 
 	var tr tokenResponse
@@ -216,30 +216,32 @@ func (c *Client) checkRunRequest(ctx context.Context, cr Credentials, method, ur
 	if err != nil {
 		return nil, fmt.Errorf("encode request body: %w", err)
 	}
-	resp, body, err := c.do(ctx, method, url, "Bearer "+token, encoded)
+	status, body, err := c.do(ctx, method, url, "Bearer "+token, encoded)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == http.StatusUnauthorized {
+	if status == http.StatusUnauthorized {
 		// The token is spent or was revoked; force a fresh mint next time.
 		c.invalidateToken(cr)
 	}
-	if resp.StatusCode != wantStatus {
-		return nil, statusError(resp.StatusCode, body)
+	if status != wantStatus {
+		return nil, statusError(status, body)
 	}
 	return body, nil
 }
 
-// do performs one request with the standard GitHub headers and reads the whole
-// response body. The authorization value is never echoed into an error.
-func (c *Client) do(ctx context.Context, method, url, authorization string, body []byte) (*http.Response, []byte, error) {
+// do performs one request with the standard GitHub headers, reads the whole
+// response body and closes it, returning the status code and body. Returning
+// the code rather than the *http.Response keeps the body's lifetime inside
+// this function. The authorization value is never echoed into an error.
+func (c *Client) do(ctx context.Context, method, url, authorization string, body []byte) (int, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build %s request: %w", method, err)
+		return 0, nil, fmt.Errorf("build %s request: %w", method, err)
 	}
 	req.Header.Set("Authorization", authorization)
 	req.Header.Set("Accept", acceptHeader)
@@ -250,15 +252,15 @@ func (c *Client) do(ctx context.Context, method, url, authorization string, body
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s %s: %w", method, redactURL(url), err)
+		return 0, nil, fmt.Errorf("%s %s: %w", method, redactURL(url), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read response body: %w", err)
+		return resp.StatusCode, nil, fmt.Errorf("read response body: %w", err)
 	}
-	return resp, respBody, nil
+	return resp.StatusCode, respBody, nil
 }
 
 // redactURL keeps request URLs quotable in errors; GitHub API URLs carry no
