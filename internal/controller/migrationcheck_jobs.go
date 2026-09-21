@@ -39,7 +39,42 @@ const (
 	// the Job controller hits its deadline it deletes the pod, and with it the
 	// log tail that explains the verdict.
 	probeJobSlack = 2 * time.Minute
+
+	// dbSettleGrace is the budget of the wait-db init container: a freshly
+	// restored CNPG instance is declared Ready by the operator and then goes
+	// unready again for a while as CNPG applies its final configuration
+	// (observed 2026-07-15 and again 2026-09-21: the app's first connection
+	// timed out in that window and its readiness endpoint cached the failure
+	// for the rest of the probe). The app only starts once pg_isready has
+	// answered six times in a row.
+	dbSettleGrace = 5 * time.Minute
+
+	// defaultPgReadyImage runs pg_isready when the clone's own image is unknown.
+	defaultPgReadyImage = "ghcr.io/cloudnative-pg/postgresql:17"
 )
+
+// waitDBScript gates the app on the database: pg_isready must succeed six
+// consecutive times, five seconds apart, so a single good answer during the
+// post-restore restart window does not let the app in early.
+const waitDBScript = `set -u
+ok=0
+i=0
+while [ "$i" -lt "$WAIT_DB_TIMEOUT" ]; do
+  if pg_isready -q -d "$DATABASE_URL"; then
+    ok=$((ok + 1))
+    if [ "$ok" -ge 6 ]; then
+      echo "wait-db: database accepted 6 consecutive checks after ${i}s"
+      exit 0
+    fi
+  else
+    ok=0
+  fi
+  i=$((i + 5))
+  sleep 5
+done
+echo "wait-db: database not stable after ${WAIT_DB_TIMEOUT}s"
+exit 1
+`
 
 // migrationProbeScript polls the app on localhost until it answers 2xx (and,
 // when PROBE_EXPECT is set, contains that substring). The CONTAINER decides the
@@ -103,22 +138,27 @@ func (r *MigrationCheckReconciler) migrationProbeJob(mc *previewv1.MigrationChec
 		path = "/"
 	}
 	timeout := probeTimeout(p)
-	// The Job's own deadline includes room to pull the image and lands after
-	// the reconciler's (timeout + probePullGrace), so the pod is still there to
-	// be tailed when the verdict is written.
-	deadline := int64((timeout + probePullGrace + probeJobSlack).Seconds())
+	// The Job's own deadline includes room to pull the image and to wait for
+	// the database, and lands after the reconciler's, so the pod is still there
+	// to be tailed when the verdict is written.
+	deadline := int64((timeout + probePullGrace + dbSettleGrace + probeJobSlack).Seconds())
+	pgImage := mc.Status.CloneImage
+	if pgImage == "" {
+		pgImage = defaultPgReadyImage
+	}
 	backoff := int32(0)
 	ttl := checkJobTTL
 	automount := false
 	sidecar := corev1.ContainerRestartPolicyAlways
 
-	appEnv := []corev1.EnvVar{{
+	dbURL := corev1.EnvVar{
 		Name: "DATABASE_URL",
 		ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: mc.Status.ConnectionSecretName},
 			Key:                  "DATABASE_URL",
 		}},
-	}}
+	}
+	appEnv := []corev1.EnvVar{dbURL}
 	keys := make([]string, 0, len(p.Env))
 	for k := range p.Env {
 		keys = append(keys, k)
@@ -176,6 +216,33 @@ func (r *MigrationCheckReconciler) migrationProbeJob(mc *previewv1.MigrationChec
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					InitContainers: []corev1.Container{{
+						// Regular init container: completes before the app sidecar starts.
+						Name:    "wait-db",
+						Image:   pgImage,
+						Command: []string{"/bin/sh", "-c", waitDBScript},
+						Env: []corev1.EnvVar{
+							dbURL,
+							{Name: "WAIT_DB_TIMEOUT", Value: strconv.FormatInt(int64(dbSettleGrace.Seconds()), 10)},
+						},
+						SecurityContext: &corev1.SecurityContext{
+							AllowPrivilegeEscalation: ptr(false),
+							ReadOnlyRootFilesystem:   ptr(true),
+							RunAsNonRoot:             ptr(true),
+							RunAsUser:                ptr(int64(26)), // the CNPG operand's postgres uid
+							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+							SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+						},
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("10m"),
+								corev1.ResourceMemory: resource.MustParse("32Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("100m"),
+								corev1.ResourceMemory: resource.MustParse("128Mi"),
+							},
+						},
+					}, {
 						Name:            "app",
 						Image:           p.Image,
 						ImagePullPolicy: corev1.PullAlways,

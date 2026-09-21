@@ -221,6 +221,12 @@ spec:
                   patch it instead of creating another.
                 format: int64
                 type: integer
+              cloneImage:
+                description: |-
+                  CloneImage is the CNPG operand image the clone runs. The probe Job's
+                  wait-db init container runs pg_isready from it, so the gate always
+                  matches the server it is waiting for and pulls nothing new.
+                type: string
               cloneNamespace:
                 description: CloneNamespace is the throwaway namespace holding the
                   CNPG clone.

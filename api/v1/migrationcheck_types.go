@@ -256,6 +256,12 @@ type MigrationCheckStatus struct {
 	// +optional
 	CloneNamespace string `json:"cloneNamespace,omitempty"`
 
+	// CloneImage is the CNPG operand image the clone runs. The probe Job's
+	// wait-db init container runs pg_isready from it, so the gate always
+	// matches the server it is waiting for and pulls nothing new.
+	// +optional
+	CloneImage string `json:"cloneImage,omitempty"`
+
 	// ExpiresAt is when the TTL GC will remove the clone.
 	// +optional
 	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`

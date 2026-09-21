@@ -309,6 +309,9 @@ func (r *MigrationCheckReconciler) checkReady(ctx context.Context, log logr.Logg
 	mc.Status.Message = "clone ready"
 	mc.Status.ConnectionSecretName = secretName
 	mc.Status.ConnectionSecretNamespace = mc.Namespace
+	if img, _, _ := unstructured.NestedString(cluster.Object, "spec", "imageName"); img != "" {
+		mc.Status.CloneImage = img
+	}
 	if err := r.Status().Update(ctx, mc); err != nil {
 		return requeueOnConflict(err)
 	}
@@ -326,7 +329,7 @@ func (r *MigrationCheckReconciler) startProbe(ctx context.Context, log logr.Logg
 	// the clone underneath it; a CR created with too little TTL left is an
 	// operator-side misconfiguration, not a verdict.
 	_, remaining := r.ttlExpired(mc)
-	if need := probeTimeout(mc.Spec.Probe) + probePullGrace; remaining < need {
+	if need := probeBudget(mc.Spec.Probe); remaining < need {
 		return r.finish(ctx, log, mc, previewv1.MigrationCheckExpired, previewv1.MigrationReasonTTLTooShort,
 			fmt.Sprintf("%s left before TTL, the probe needs %s", remaining.Round(time.Second), need))
 	}
@@ -580,11 +583,17 @@ func (r *MigrationCheckReconciler) readyDeadlinePassed(mc *previewv1.MigrationCh
 	return r.now().After(start.Add(r.readyTimeout(mc)))
 }
 
+// probeBudget is the reconciler's deadline for a probe: image pull, database
+// settle, then the app's own boot budget.
+func probeBudget(p *previewv1.MigrationProbe) time.Duration {
+	return probeTimeout(p) + probePullGrace + dbSettleGrace
+}
+
 func (r *MigrationCheckReconciler) probeDeadlinePassed(mc *previewv1.MigrationCheck) bool {
 	if mc.Status.ProbeStartedAt == nil {
 		return false
 	}
-	return r.now().After(mc.Status.ProbeStartedAt.Add(probeTimeout(mc.Spec.Probe) + probePullGrace))
+	return r.now().After(mc.Status.ProbeStartedAt.Add(probeBudget(mc.Spec.Probe)))
 }
 
 func probePath(mc *previewv1.MigrationCheck) string {

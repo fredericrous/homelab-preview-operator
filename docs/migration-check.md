@@ -59,6 +59,10 @@ spec:
 
 Once the clone is `Ready`, the operator creates a Job **in the CR's namespace**:
 
+- a `wait-db` init container running `pg_isready` from the clone's own CNPG
+  image until it succeeds six times in a row (a restored instance goes
+  unready again briefly after the operator sees it Ready; the app must not
+  boot into that window and cache the failure);
 - an `app` init container with `restartPolicy: Always` (a native sidecar)
   running `probe.image` with its own entrypoint, `DATABASE_URL` injected from
   the connection Secret the operator published, plus `probe.env` as plain
