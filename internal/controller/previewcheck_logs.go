@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,6 +28,12 @@ func NewPodLogTailer(cs kubernetes.Interface) *PodLogTailer {
 }
 
 // TailJobLogs returns at most maxBytes of the newest pod's log for a Job.
+//
+// A single-container pod is read as-is. A multi-container pod (the migration
+// probe runs the app as a sidecar next to the curl poller) is read one
+// container at a time — the API refuses an unqualified request there — and
+// the tails are concatenated under `--- <container> ---` headers, app first,
+// so the migration output lands above the probe's verdict.
 func (t *PodLogTailer) TailJobLogs(ctx context.Context, namespace, jobName string, maxBytes int64) (string, error) {
 	if t == nil || t.clientset == nil {
 		return "", fmt.Errorf("no log tailer configured")
@@ -48,30 +55,64 @@ func (t *PodLogTailer) TailJobLogs(ctx context.Context, namespace, jobName strin
 	sort.Slice(items, func(i, j int) bool {
 		return items[j].CreationTimestamp.Before(&items[i].CreationTimestamp)
 	})
+	pod := &items[0]
 
+	var containers []string
+	for _, c := range pod.Spec.InitContainers {
+		containers = append(containers, c.Name)
+	}
+	for _, c := range pod.Spec.Containers {
+		containers = append(containers, c.Name)
+	}
+	if len(containers) <= 1 {
+		return t.readContainer(ctx, namespace, pod.Name, "", maxBytes)
+	}
+
+	per := maxBytes / int64(len(containers))
+	if per < 512 {
+		per = 512
+	}
+	var out strings.Builder
+	var firstErr error
+	for _, name := range containers {
+		text, err := t.readContainer(ctx, namespace, pod.Name, name, per)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			text = "(no log: " + err.Error() + ")"
+		}
+		fmt.Fprintf(&out, "--- %s ---\n%s\n", name, strings.TrimRight(text, "\n"))
+	}
+	if out.Len() == 0 && firstErr != nil {
+		return "", firstErr
+	}
+	return out.String(), nil
+}
+
+// readContainer streams the tail of one container's log (any container when
+// name is empty, which only the API accepts for single-container pods).
+func (t *PodLogTailer) readContainer(ctx context.Context, namespace, podName, container string, maxBytes int64) (string, error) {
 	// TailLines bounds what the API server reads; LimitBytes bounds what crosses
 	// the wire. Both are needed: LimitBytes alone truncates from the START of
 	// the log, which on a chatty test image is the least useful part.
 	tail := int64(50)
-	req := t.clientset.CoreV1().Pods(namespace).GetLogs(items[0].Name, &corev1.PodLogOptions{
-		TailLines: &tail,
-		LimitBytes: func() *int64 {
-			// Ask for a little more than we keep, so TruncateLogTail can cut on
-			// a line boundary instead of mid-word.
-			n := maxBytes + 512
-			return &n
-		}(),
+	limit := maxBytes + 512 // a little more than we keep, so the cut lands on a line boundary
+	req := t.clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container:  container,
+		TailLines:  &tail,
+		LimitBytes: &limit,
 	})
 
 	stream, err := req.Stream(ctx)
 	if err != nil {
-		return "", fmt.Errorf("stream logs for %s/%s: %w", namespace, items[0].Name, err)
+		return "", fmt.Errorf("stream logs for %s/%s: %w", namespace, podName, err)
 	}
 	defer stream.Close() //nolint:errcheck // read-only stream
 
-	data, err := io.ReadAll(io.LimitReader(stream, maxBytes+512))
+	data, err := io.ReadAll(io.LimitReader(stream, limit))
 	if err != nil {
-		return "", fmt.Errorf("read logs for %s/%s: %w", namespace, items[0].Name, err)
+		return "", fmt.Errorf("read logs for %s/%s: %w", namespace, podName, err)
 	}
 	return string(data), nil
 }

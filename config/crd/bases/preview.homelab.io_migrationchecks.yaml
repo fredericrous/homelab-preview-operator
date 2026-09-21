@@ -135,6 +135,16 @@ spec:
                     maxLength: 512
                     pattern: ^/
                     type: string
+                  runAsUser:
+                    description: |-
+                      RunAsUser is the numeric uid the app container runs as. Required when the
+                      image sets its USER by name: the pod runs with runAsNonRoot, and the
+                      kubelet refuses to start a container whose image user it cannot prove is
+                      non-root ("image has non-numeric user"). Must match the image's user for
+                      files the app owns.
+                    format: int64
+                    minimum: 1
+                    type: integer
                   timeoutSeconds:
                     default: 600
                     description: |-
