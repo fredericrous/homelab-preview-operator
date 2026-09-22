@@ -102,6 +102,17 @@ type MigrationProbe struct {
 	// +kubebuilder:validation:MaxLength=253
 	Image string `json:"image"`
 
+	// Command and Args, when set, replace the image's entrypoint and command
+	// for the app container. Use them when the image's default command starts
+	// more than the server under test (cluster-vision's CMD also boots an SSR
+	// front end). The verdict still comes from the HTTP poll below.
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Command []string `json:"command,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	Args []string `json:"args,omitempty"`
+
 	// Port is the localhost port the app listens on.
 	// +optional
 	// +kubebuilder:default=3000
