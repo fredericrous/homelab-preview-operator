@@ -247,6 +247,8 @@ func (r *MigrationCheckReconciler) migrationProbeJob(mc *previewv1.MigrationChec
 						Image:           p.Image,
 						ImagePullPolicy: corev1.PullAlways,
 						RestartPolicy:   &sidecar,
+						Command:         p.Command,
+						Args:            p.Args,
 						Env:             appEnv,
 						SecurityContext: containerSC,
 						Resources: corev1.ResourceRequirements{

@@ -102,6 +102,21 @@ spec:
                   Ready and turns this MigrationCheck into a verdict. Nil keeps the push
                   behaviour: publish the connection Secret and wait.
                 properties:
+                  args:
+                    items:
+                      type: string
+                    maxItems: 32
+                    type: array
+                  command:
+                    description: |-
+                      Command and Args, when set, replace the image's entrypoint and command
+                      for the app container. Use them when the image's default command starts
+                      more than the server under test (cluster-vision's CMD also boots an SSR
+                      front end). The verdict still comes from the HTTP poll below.
+                    items:
+                      type: string
+                    maxItems: 16
+                    type: array
                   env:
                     additionalProperties:
                       type: string

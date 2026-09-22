@@ -64,7 +64,9 @@ Once the clone is `Ready`, the operator creates a Job **in the CR's namespace**:
   unready again briefly after the operator sees it Ready; the app must not
   boot into that window and cache the failure);
 - an `app` init container with `restartPolicy: Always` (a native sidecar)
-  running `probe.image` with its own entrypoint, `DATABASE_URL` injected from
+  running `probe.image` with its own entrypoint (or `probe.command`/`args`
+  when the image's default command starts more than the server under test),
+  `DATABASE_URL` injected from
   the connection Secret the operator published, plus `probe.env` as plain
   values;
 - a `probe` container (the operator's `--probe-image`, curl) polling

@@ -255,6 +255,9 @@ func TestMigrationCheck_StartProbeCreatesJob(t *testing.T) {
 	if app.RestartPolicy == nil || *app.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatal("app container must be a native sidecar (restartPolicy Always)")
 	}
+	if len(app.Command) != 0 || len(app.Args) != 0 {
+		t.Fatalf("without probe.command the image entrypoint must be kept: %v %v", app.Command, app.Args)
+	}
 	dbRefs := 0
 	for _, e := range app.Env {
 		if e.Name == "DATABASE_URL" {
@@ -295,6 +298,22 @@ func TestMigrationCheck_StartProbeCreatesJob(t *testing.T) {
 	}
 	if got.Status.CheckRunID == 0 || got.Status.ReportedPhase != previewv1.MigrationCheckRunning {
 		t.Fatalf("check run not recorded: id=%d reported=%s", got.Status.CheckRunID, got.Status.ReportedPhase)
+	}
+}
+
+func TestMigrationCheck_ProbeCommandOverridesEntrypoint(t *testing.T) {
+	f := newMCFixture(t, jobsNamespace(true), readyCheck(func(mc *previewv1.MigrationCheck) {
+		mc.Spec.Probe.Command = []string{"/api"}
+		mc.Spec.Probe.Args = []string{"-port", "8080"}
+	}))
+	f.reconcile()
+	jobs := f.jobs()
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %d", len(jobs))
+	}
+	app := jobs[0].Spec.Template.Spec.InitContainers[1]
+	if strings.Join(app.Command, " ") != "/api" || strings.Join(app.Args, " ") != "-port 8080" {
+		t.Fatalf("command/args not applied: %v %v", app.Command, app.Args)
 	}
 }
 
