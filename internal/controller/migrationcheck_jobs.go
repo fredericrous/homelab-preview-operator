@@ -40,22 +40,38 @@ const (
 	// log tail that explains the verdict.
 	probeJobSlack = 2 * time.Minute
 
-	// dbSettleGrace is the budget of the wait-db init container: a freshly
-	// restored CNPG instance is declared Ready by the operator and then goes
-	// unready again for a while as CNPG applies its final configuration
-	// (observed 2026-07-15 and again 2026-09-21: the app's first connection
-	// timed out in that window and its readiness endpoint cached the failure
-	// for the rest of the probe). The app only starts once pg_isready has
-	// answered six times in a row.
-	dbSettleGrace = 5 * time.Minute
+	// dbSettleGrace is the budget of the wait-db init container: settle,
+	// then warm. A freshly restored CNPG instance is declared Ready by the
+	// operator and then goes unready again for a while as CNPG applies its
+	// final configuration (observed 2026-07-15 and again 2026-09-21: the
+	// app's first connection timed out in that window and its readiness
+	// endpoint cached the failure for the rest of the probe), so the app only
+	// starts once pg_isready has answered six times in a row. Then the target
+	// database is read through once: the clone's volume is a snapshot-backed
+	// RBD clone that serves every page it has not yet copied at seconds per
+	// page (a checkpoint of 600 buffers took 187 s on 2026-09-22, and a
+	// migrator's lock + version lookup hung for 7 min on cold catalog pages),
+	// while a sequential pass over the same 434 MB took 35 s. Ten minutes
+	// covers the settle window plus a few GB of data.
+	dbSettleGrace = 10 * time.Minute
 
 	// defaultPgReadyImage runs pg_isready when the clone's own image is unknown.
 	defaultPgReadyImage = "ghcr.io/cloudnative-pg/postgresql:17"
 )
 
-// waitDBScript gates the app on the database: pg_isready must succeed six
-// consecutive times, five seconds apart, so a single good answer during the
-// post-restore restart window does not let the app in early.
+// waitDBScript gates the app on the database in two steps.
+//
+// Settle: pg_isready must succeed six consecutive times, five seconds apart,
+// so a single good answer during the post-restore restart window does not let
+// the app in early.
+//
+// Warm: pg_prewarm ('read' mode: a sequential pass through the OS cache,
+// which is what turns the snapshot-backed volume's per-page copy-ups into one
+// stream) over every user relation and the system catalog of the target
+// database. Best-effort: a clone whose image lacks the extension, or a
+// database that refuses it, logs and continues — the app then pays the cold
+// pages itself, which is slower, not wrong. The extension is created and
+// dropped inside the clone, which is thrown away with the check.
 const waitDBScript = `set -u
 ok=0
 i=0
@@ -64,7 +80,7 @@ while [ "$i" -lt "$WAIT_DB_TIMEOUT" ]; do
     ok=$((ok + 1))
     if [ "$ok" -ge 6 ]; then
       echo "wait-db: database accepted 6 consecutive checks after ${i}s"
-      exit 0
+      break
     fi
   else
     ok=0
@@ -72,8 +88,31 @@ while [ "$i" -lt "$WAIT_DB_TIMEOUT" ]; do
   i=$((i + 5))
   sleep 5
 done
-echo "wait-db: database not stable after ${WAIT_DB_TIMEOUT}s"
-exit 1
+if [ "$ok" -lt 6 ]; then
+  echo "wait-db: database not stable after ${WAIT_DB_TIMEOUT}s"
+  exit 1
+fi
+start=$(date +%s)
+if psql -X -q -v ON_ERROR_STOP=1 -d "$DATABASE_URL" <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pg_prewarm;
+SELECT count(*) AS catalog_relations FROM (
+  SELECT pg_prewarm(c.oid::regclass, 'read')
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'pg_catalog' AND c.relkind IN ('r', 'i')
+) s;
+SELECT count(*) AS user_relations, pg_size_pretty(sum(pg_relation_size(c.oid))) AS warmed FROM (
+  SELECT c.oid, pg_prewarm(c.oid::regclass, 'read')
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind IN ('r', 'i', 't', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+) s JOIN pg_class c ON c.oid = s.oid;
+DROP EXTENSION pg_prewarm;
+SQL
+then
+  echo "wait-db: database warmed in $(( $(date +%s) - start ))s"
+else
+  echo "wait-db: prewarm unavailable or failed after $(( $(date +%s) - start ))s; the app pays the cold pages"
+fi
+exit 0
 `
 
 // migrationProbeScript polls the app on localhost until it answers 2xx (and,

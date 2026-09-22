@@ -59,10 +59,14 @@ spec:
 
 Once the clone is `Ready`, the operator creates a Job **in the CR's namespace**:
 
-- a `wait-db` init container running `pg_isready` from the clone's own CNPG
-  image until it succeeds six times in a row (a restored instance goes
-  unready again briefly after the operator sees it Ready; the app must not
-  boot into that window and cache the failure);
+- a `wait-db` init container, from the clone's own CNPG image, that first
+  waits for `pg_isready` to succeed six times in a row (a restored instance
+  goes unready again briefly after the operator sees it Ready; the app must
+  not boot into that window and cache the failure), then reads the target
+  database through once with `pg_prewarm` (the clone's snapshot-backed volume
+  serves cold pages at seconds per page; a sequential pass over the same data
+  takes seconds per hundred megabytes, and the app's migrator would otherwise
+  stall for minutes on its first catalog reads);
 - an `app` init container with `restartPolicy: Always` (a native sidecar)
   running `probe.image` with its own entrypoint (or `probe.command`/`args`
   when the image's default command starts more than the server under test),
