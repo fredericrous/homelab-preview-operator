@@ -1,0 +1,31 @@
+# The decision registry for homelab-preview-operator.
+#
+# This repository declares no architectural questions of its own yet: every
+# decision it lives under is a FLEET decision, made once in the `decisions`
+# repository and vendored below. A record here deciding one of their slots
+# would be a contradiction, not an override.
+#
+# `aval add github:fredericrous/decisions` refreshes the pack; nothing tells
+# this repository when a fleet decision changes, so `aval add --check` asks.
+
+packs:
+  - .adr/packs/decisions.pack
+
+# No scopes and no keys of this repository's own: everything answerable here
+# comes from the pack. Declare a key here the day this repository has a
+# question the fleet does not answer.
+scopes: []
+keys:
+
+# Which parts of this repository have which traits (aval 1.7, SEMANTICS
+# section 2.5). None: no rule about a command line or a UI is listed here.
+areas:
+  "**": []
+
+# `aval traits --detect` reads the `package main` below as a command line.
+# It is not one: a Kubernetes controller is configured by its Deployment
+# manifest and run by the kubelet; no person or script types its flags, reads
+# its output or branches on its exit code, which is what the command-line rules
+# are about.
+disclaims:
+  "cmd/**": [cli]
