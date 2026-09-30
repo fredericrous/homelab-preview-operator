@@ -64,9 +64,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # platform: any — this suite ships as a single-target Linux image and
+      # its Go tests do not depend on where they ran, so a macOS laptop's
+      # attestation covers this Linux runner. Repos that ship per-platform
+      # binaries (amont, amont-agent, aval, relais) keep the strict default.
       - name: Attestation check
         id: attest
         uses: fredericrous/attest@v1
+        with:
+          platform: any
 
       - name: Set up Go
         uses: actions/setup-go@v5
