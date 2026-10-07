@@ -32,11 +32,12 @@ help:
 
 ##@ Development
 
+# controller-gen paths list the module's own packages: tools/ is a separate module (gopls pin, needs go >= 1.26) that a ./... root would load under GOTOOLCHAIN=go$(GO_VERSION).
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./api/...;./cmd/...;./internal/..." output:crd:artifacts:config=config/crd/bases
 
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
-	$(CONTROLLER_GEN) object paths="./..."
+	$(CONTROLLER_GEN) object paths="./api/...;./cmd/...;./internal/..."
 
 fmt: ## Run go fmt against code.
 	go fmt ./...
