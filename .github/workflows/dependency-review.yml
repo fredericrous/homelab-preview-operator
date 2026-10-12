@@ -31,7 +31,10 @@ jobs:
           go-version-file: go.mod
 
       - name: Install go-licenses
-        run: go install github.com/google/go-licenses@latest
+        # Pinned: go-licenses fails the check, so @latest would let an upstream
+        # release turn it red without a change here. v2 lives under the
+        # separate /v2 module path.
+        run: go install github.com/google/go-licenses@v1.6.0
 
       - name: Check licenses
         run: |
