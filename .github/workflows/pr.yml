@@ -11,6 +11,8 @@ env:
   # Pinned: gosec now fails the build, so an unpinned @latest would let any
   # upstream release turn CI red without a change on our side.
   GOSEC_VERSION: v2.28.0
+  # Pinned for the same reason: govulncheck fails the build too.
+  GOVULNCHECK_VERSION: v1.7.0
 
 jobs:
   # A CRD or DeepCopy that only exists on the author's machine is the failure
@@ -152,7 +154,7 @@ jobs:
 
       - name: Check for vulnerabilities
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
           govulncheck ./...
 
       - name: Install dependencies
