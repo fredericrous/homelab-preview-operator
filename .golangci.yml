@@ -15,6 +15,7 @@ linters:
     - nilerr # returning nil after a non-nil error (silently swallowed failures)
     - misspell
     - unconvert
+    - nolintlint
 
   exclusions:
     rules:
@@ -25,3 +26,8 @@ linters:
         linters:
           - errcheck
           - gosec
+  settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
