@@ -11,4 +11,4 @@ This repository's slice of the fleet plan: Phase 1. The plan, its review
 and its recipe are canonical in adr-lint (pilot: fredericrous/adr-lint#53).
 
 ## Code review
-- homelab-preview-operator: backend, platform
+- homelab-preview-operator: none — a copy of the recipe A block that backend and platform approved in adr-lint#53, differing only in the `AVAL_VERSION` pin (the person's choice, 2026-11-08); implementation-review alone
