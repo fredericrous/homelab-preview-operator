@@ -67,10 +67,11 @@ func nfsTestHandler(t *testing.T, objs ...client.Object) *PreviewHandler {
 	return &PreviewHandler{client: c, log: logr.Discard(), previewDomain: "example.test"}
 }
 
-func prodDeployment() *appsv1.Deployment {
+func prodDeployment(t *testing.T) *appsv1.Deployment {
+	t.Helper()
 	var deployment appsv1.Deployment
 	if err := sigsyaml.Unmarshal([]byte(sampleDeploymentYAML), &deployment); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	deployment.Namespace = "myapp"
 	uid := int64(1000)
@@ -98,7 +99,11 @@ func nfsPersistentVolume(name string) *corev1.PersistentVolume {
 // and returns the rendered pod spec.
 func renderPodSpec(t *testing.T, config *v1.PreviewConfig, nfs *nfsConfigVolume) map[string]interface{} {
 	t.Helper()
-	patches := buildAllPatches("myapp", "7", "preview-pr-7", "example.test", config, "", nil, nfs)
+	nfsPatch, err := generateNFSConfigVolumePatch("myapp", "7", "preview-pr-7", "example.test", nfs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patches := buildAllPatches("myapp", "7", "preview-pr-7", "example.test", config, "", nil, nfsPatch)
 	var kustomization struct {
 		Resources []string                 `json:"resources"`
 		Patches   []map[string]interface{} `json:"patches"`
@@ -208,10 +213,13 @@ func TestNFSPatchWithCopyAddsReadOnlySourceAndSeed(t *testing.T) {
 		t.Fatalf("source mount must be read-only at /src: %v", seed["volumeMounts"])
 	}
 	resources := seed["resources"].(map[string]interface{})
-	for _, kind := range []string{"requests", "limits"} {
-		if resources[kind].(map[string]interface{})["ephemeral-storage"] != "256Mi" {
-			t.Fatalf("%s lack ephemeral-storage: %v", kind, resources)
-		}
+	if resources["requests"].(map[string]interface{})["ephemeral-storage"] != "16Mi" ||
+		resources["limits"].(map[string]interface{})["ephemeral-storage"] != "64Mi" {
+		t.Fatalf("seed container ephemeral-storage = %v", resources)
+	}
+	security := seed["securityContext"].(map[string]interface{})
+	if security["runAsUser"] != float64(0) || security["runAsNonRoot"] != false {
+		t.Fatalf("seed must run as root even when the pod sets runAsNonRoot: %v", security)
 	}
 	env := map[string]string{}
 	for _, entry := range seed["env"].([]interface{}) {
@@ -224,7 +232,7 @@ func TestNFSPatchWithCopyAddsReadOnlySourceAndSeed(t *testing.T) {
 }
 
 func TestResolveNFSConfigVolumeReadsClusterState(t *testing.T) {
-	h := nfsTestHandler(t, prodDeployment(), prodClaim("pv-1"), nfsPersistentVolume("pv-1"))
+	h := nfsTestHandler(t, prodDeployment(t), prodClaim("pv-1"), nfsPersistentVolume("pv-1"))
 	got, err := h.resolveNFSConfigVolume(context.Background(), "myapp", nfsConfig(true))
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +249,7 @@ func TestResolveNFSConfigVolumeReadsClusterState(t *testing.T) {
 }
 
 func TestResolveNFSConfigVolumeWithoutCopyNeedsNoPV(t *testing.T) {
-	h := nfsTestHandler(t, prodDeployment())
+	h := nfsTestHandler(t, prodDeployment(t))
 	got, err := h.resolveNFSConfigVolume(context.Background(), "myapp", nfsConfig(false))
 	if err != nil || got == nil || got.Copy {
 		t.Fatalf("got %+v, err %v", got, err)
@@ -261,8 +269,15 @@ func TestResolveNFSConfigVolumeErrors(t *testing.T) {
 	helm := nfsConfig(false)
 	helm.Spec.DeploymentType = v1.DeploymentTypeHelm
 	nonNFS := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv-1"}}
-	otherClaim := prodDeployment()
+	otherClaim := prodDeployment(t)
 	otherClaim.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "other"
+	initWritesConfig := prodDeployment(t)
+	initWritesConfig.Spec.Template.Spec.InitContainers = []corev1.Container{{
+		Name: "templater", Image: "busybox", VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/etc/myapp"}},
+	}}
+	zeroLimit := nfsConfig(false)
+	zero := resource.MustParse("0")
+	zeroLimit.Spec.ConfigVolume.NFS.SizeLimit = &zero
 
 	cases := []struct {
 		name    string
@@ -272,12 +287,16 @@ func TestResolveNFSConfigVolumeErrors(t *testing.T) {
 		notWant string
 	}{
 		{"helm", nil, helm, "mode: nfs supports raw-manifest Deployments only; Helm-rendered Deployments are not patched", ""},
-		{"non-NFS PV", []client.Object{prodDeployment(), prodClaim("pv-1"), nonNFS}, nfsConfig(true),
+		{"non-NFS PV", []client.Object{prodDeployment(t), prodClaim("pv-1"), nonNFS}, nfsConfig(true),
 			`configVolume.claimName "myapp-config" is bound to PV "pv-1", which has no spec.nfs`, ""},
-		{"unbound PVC", []client.Object{prodDeployment(), prodClaim("")}, nfsConfig(true),
+		{"unbound PVC", []client.Object{prodDeployment(t), prodClaim("")}, nfsConfig(true),
 			`configVolume.claimName "myapp-config" in namespace "myapp" is not bound to a PV`, `PV ""`},
 		{"volume not mounted", []client.Object{otherClaim}, nfsConfig(false),
 			`is not used as a persistentVolumeClaim volume by Deployment "myapp"`, ""},
+		{"init container uses the volume", []client.Object{initWritesConfig, prodClaim("pv-1"), nfsPersistentVolume("pv-1")}, nfsConfig(true),
+			`init container "templater" of Deployment "myapp" mounts volume "config"`, ""},
+		{"non-positive sizeLimit", []client.Object{prodDeployment(t)}, zeroLimit,
+			`configVolume.nfs.sizeLimit "0" must be positive`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -353,6 +372,10 @@ func runSeedScript(t *testing.T, src, dst string, env ...string) (string, error)
 		"-e", "PR=7", "-e", "APP=myapp", "-e", "SOURCE=nas.local:/export/myapp",
 		"-e", "LIMIT=256Mi", "-e", "LIMIT_KIB=262144"}
 	for _, pair := range env {
+		if strings.HasPrefix(pair, "--") {
+			args = append(args, pair) // a docker flag
+			continue
+		}
 		args = append(args, "-e", pair)
 	}
 	args = append(args, "alpine:3.21", "/bin/sh", "-c", nfsSeedScript)
@@ -383,7 +406,10 @@ func TestNFSSeedScriptRewritesOnceAndSkipsBinaries(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("app.conf = %q, want %q", got, want)
 	}
-	blob, _ := os.ReadFile(filepath.Join(dst, "blob.bin"))
+	blob, err := os.ReadFile(filepath.Join(dst, "blob.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(blob) != string(binary) {
 		t.Fatalf("binary file was modified: %v", blob)
 	}
@@ -400,5 +426,23 @@ func TestNFSSeedScriptAbortsOverSizeLimit(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dst); len(entries) != 0 {
 		t.Fatalf("nothing may be copied past the limit: %v", entries)
+	}
+}
+
+// TestNFSSeedScriptFailsOnUnreadableFile drops the capabilities that let root read anything,
+// which is what a root-squashed export looks like to the seed container.
+func TestNFSSeedScriptFailsOnUnreadableFile(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	for _, dir := range []string{src, dst} {
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(src, "locked.conf"), []byte("secret\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runSeedScript(t, src, dst, "--cap-drop=DAC_OVERRIDE", "--cap-drop=DAC_READ_SEARCH")
+	if err == nil || !strings.Contains(out, "root-squashed") {
+		t.Fatalf("expected a root-squash failure, got err=%v out=%s", err, out)
 	}
 }

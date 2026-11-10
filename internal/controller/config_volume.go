@@ -463,6 +463,9 @@ func (h *PreviewHandler) resolveNFSConfigVolume(ctx context.Context, appName str
 	copySeed := false
 	if cv.NFS != nil {
 		if cv.NFS.SizeLimit != nil {
+			if cv.NFS.SizeLimit.Sign() <= 0 {
+				return nil, fmt.Errorf("configVolume.nfs.sizeLimit %q must be positive", cv.NFS.SizeLimit.String())
+			}
 			sizeLimit = *cv.NFS.SizeLimit
 		}
 		if cv.NFS.Copy != nil {
@@ -489,6 +492,16 @@ func (h *PreviewHandler) resolveNFSConfigVolume(ctx context.Context, appName str
 	if !copySeed {
 		h.log.Info("NFS config volume patched", "app", appName, "copy", false, "pv", "")
 		return resolved, nil
+	}
+
+	// config-seed runs after the Deployment's own init containers and clears the volume first,
+	// so an init container that writes into it would lose its output.
+	for _, initContainer := range deployment.Spec.Template.Spec.InitContainers {
+		for _, mount := range initContainer.VolumeMounts {
+			if mount.Name == volumeName {
+				return nil, fmt.Errorf("configVolume.claimName %q: init container %q of Deployment %q mounts volume %q; nfs.copy: true would clear its output. Set nfs.copy: false or use mode: snapshot", cv.ClaimName, initContainer.Name, appName, volumeName)
+			}
+		}
 	}
 
 	var claim corev1.PersistentVolumeClaim
@@ -545,13 +558,17 @@ func appRunAsIDs(deployment *appsv1.Deployment, appName string) (user, group *in
 // nfsSeedScript copies the NFS export into the temp dir and rewrites preview URLs. Its inputs
 // arrive as environment variables, so no value is interpolated into shell source.
 const nfsSeedScript = `set -u
+trap 'exit 143' TERM INT
 fail() { echo "config-seed: $*" >&2; exit 1; }
+printf 'a\n' | grep -Iq . || fail "grep -I is not supported by this image"
 SRC="${SRC_DIR:-/src}"
 DST="${CONFIG_DIR:-/config}"
 find "$DST" -mindepth 1 -delete || fail "cannot clear $DST"
-SRC_KIB=$(du -sk "$SRC" | cut -f1) || fail "cannot read $SOURCE; the export may be root-squashed; set nfs.copy: false to start empty"
+SRC_USAGE=$(du -sk "$SRC") || fail "cannot read $SOURCE; the export may be root-squashed; set nfs.copy: false to start empty"
+SRC_KIB=${SRC_USAGE%%[!0-9]*}
+case "$SRC_KIB" in ''|*[!0-9]*) fail "cannot size $SOURCE" ;; esac
 if [ "$SRC_KIB" -gt "$LIMIT_KIB" ]; then
-  fail "source $SOURCE is $((SRC_KIB / 1024))Mi, over sizeLimit $LIMIT; raise configVolume.nfs.sizeLimit or set nfs.copy: false"
+  fail "source $SOURCE is $(((SRC_KIB + 1023) / 1024))Mi, over sizeLimit $LIMIT; raise configVolume.nfs.sizeLimit or set nfs.copy: false"
 fi
 cp -a "$SRC"/. "$DST"/ || fail "cannot copy $SOURCE; the export may be root-squashed; set nfs.copy: false to start empty"
 export PROD_NS PREVIEW_NS DOMAIN PR APP

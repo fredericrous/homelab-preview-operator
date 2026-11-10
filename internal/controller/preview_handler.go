@@ -117,7 +117,7 @@ func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomize
 		}
 	}
 
-	nfsVolume, err := h.resolveNFSConfigVolume(ctx, appName, config)
+	nfsPatch, err := h.buildNFSPatch(ctx, appName, prNumber, namespace, config)
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomize
 
 	// Generate patches without DB credentials — CNPG hasn't been created yet.
 	// DB credentials will be injected later by UpdateDBCredentialPatches (State 3).
-	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, nil, nfsVolume)
+	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, nil, nfsPatch)
 
 	// Apply patches to the Kustomization
 	ks.Spec.Patches = allPatches
@@ -241,14 +241,14 @@ func (h *PreviewHandler) UpdateDBCredentialPatches(ctx context.Context, ks *kust
 		Password: string(secret.Data["password"]),
 	}
 
-	nfsVolume, err := h.resolveNFSConfigVolume(ctx, appName, config)
+	nfsPatch, err := h.buildNFSPatch(ctx, appName, prNumber, namespace, config)
 	if err != nil {
 		return err
 	}
 
 	// Regenerate all patches with DB credentials
 	callbackPath := h.discoverOIDCCallbackPath(ctx, appName)
-	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, dbCreds, nfsVolume)
+	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, dbCreds, nfsPatch)
 
 	// Update the Kustomization with new patches and mark credentials as patched
 	ks.Spec.Patches = allPatches

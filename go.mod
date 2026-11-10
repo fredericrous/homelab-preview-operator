@@ -13,7 +13,7 @@ require (
 	k8s.io/client-go v0.31.1
 	k8s.io/utils v0.0.0-20240711033017-18e509b52bc8
 	sigs.k8s.io/controller-runtime v0.19.0
-	// Test-only: renders the mode: nfs Kustomization patch with the engine Flux runs. Pulls kyaml and four
+	// Test-only: renders the mode: nfs Kustomization patch with the engine Flux runs. Pulls kyaml and five
 	// small libraries, no build script; a Kubernetes SIG release every few weeks; if abandoned, drop the
 	// render test and keep the string assertions.
 	sigs.k8s.io/kustomize/api v0.18.0

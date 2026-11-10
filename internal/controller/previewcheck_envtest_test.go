@@ -396,7 +396,7 @@ func TestEnvtest_ConfigVolumeNFSRule(t *testing.T) {
 			t.Errorf("%s must be accepted: %v", pc.Name, err)
 			continue
 		}
-		t.Cleanup(func() { _ = cl.Delete(ctx, pc) })
+		t.Cleanup(func() { _ = cl.Delete(ctx, pc) }) // best-effort: the envtest API server is torn down after the run
 	}
 
 	for _, pc := range []*previewv1.PreviewConfig{
@@ -405,7 +405,7 @@ func TestEnvtest_ConfigVolumeNFSRule(t *testing.T) {
 	} {
 		err := cl.Create(ctx, pc)
 		if err == nil {
-			_ = cl.Delete(ctx, pc)
+			_ = cl.Delete(ctx, pc) // best-effort: the test already failed, this only tidies the shared API server
 			t.Errorf("%s must be rejected", pc.Name)
 			continue
 		}
