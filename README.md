@@ -122,6 +122,44 @@ Caveats:
 - The operator needs `get` (and `list`/`watch` for its cache) on `persistentvolumes`,
   cluster-wide and read-only.
 
+### NFS media volumes and the egress fence
+
+`nfsVolumes` mounts production NFS exports in the preview read-only. Each entry names a PVC of
+the production Deployment that is bound to a static NFS PersistentVolume. The preview does not
+render that PVC (nor any PersistentVolume, which every preview now strips); its Deployment
+volume becomes an inline `nfs` volume with `readOnly: true`, so the kubelet mounts the export
+`ro` for every container mount, `subPath` ones included. `configVolume.mode: nfs` is a different
+feature (a temp dir in place of the config claim) and combines with `nfsVolumes` on other claims.
+
+```yaml
+spec:
+  configVolume:
+    claimName: radarr-config   # snapshot clone of the Ceph config
+  nfsVolumes:                  # prod NFS exports mounted read-only
+    - claimName: media
+    - claimName: media2
+  isolateEgress: true          # egress: kube-dns and the preview namespace only
+```
+
+`isolateEgress: true` creates the NetworkPolicy `preview-egress-fence` before the Kustomization
+is unsuspended: egress to `kube-dns` in `kube-system` on port 53 (UDP and TCP) and to every pod
+of the preview namespace, nothing else. If the policy cannot be written, the Kustomization stays
+suspended and the error is retried. With the flag false or absent, an existing fence is deleted
+on the next render. NFS is mounted by the kubelet on the node, so the fence does not cut the
+share; ingress is untouched.
+
+`nfsVolumes` supports raw-manifest Deployments only (`deploymentType: helm` is refused, as is
+the legacy `Process` flow), and a claim cannot be in both `configVolume.claimName` and
+`nfsVolumes`. The operator needs `get`, `create`, `update` and `delete` on `networkpolicies`.
+
+Caveats:
+
+- Inline NFS volumes take no `mountOptions`: the PV's options (such as `vers=4,hard`) are not carried.
+- The app may warn that a root folder is not writable.
+- In a fenced preview, searches, grabs and notifications fail by design.
+- Each preview rescans the library over the production export.
+- NetworkPolicies are additive: a NetworkPolicy an adopter's manifests render widens the fence.
+
 ## PR Comments
 
 When a preview environment is ready, the operator posts (and later updates) a

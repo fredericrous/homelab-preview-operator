@@ -57,6 +57,10 @@ func (h *PreviewHandler) Process(ctx context.Context, ks *kustomizev1.Kustomizat
 		return fmt.Errorf("failed to fetch preview config: %w", err)
 	}
 
+	if len(config.Spec.NFSVolumes) > 0 {
+		return fmt.Errorf("nfsVolumes is supported by the Kustomization flow only")
+	}
+
 	// 2. Discover and clone OIDC client from production
 	if err := h.setupOIDC(ctx, namespace, appName, prNumber); err != nil {
 		return fmt.Errorf("failed to setup OIDC: %w", err)
@@ -117,8 +121,17 @@ func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomize
 		}
 	}
 
-	nfsPatch, err := h.buildNFSPatch(ctx, appName, prNumber, namespace, config)
+	volumePatches, err := h.buildVolumePatches(ctx, appName, prNumber, namespace, config)
 	if err != nil {
+		return err
+	}
+
+	// The fence exists before the Kustomization is unsuspended; a failure leaves it suspended.
+	if config.Spec.IsolateEgress {
+		if err := h.ensureEgressFence(ctx, namespace); err != nil {
+			return err
+		}
+	} else if err := h.removeEgressFence(ctx, namespace); err != nil {
 		return err
 	}
 
@@ -127,7 +140,7 @@ func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomize
 
 	// Generate patches without DB credentials — CNPG hasn't been created yet.
 	// DB credentials will be injected later by UpdateDBCredentialPatches (State 3).
-	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, nil, nfsPatch)
+	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, nil, volumePatches)
 
 	// Apply patches to the Kustomization
 	ks.Spec.Patches = allPatches
@@ -241,14 +254,14 @@ func (h *PreviewHandler) UpdateDBCredentialPatches(ctx context.Context, ks *kust
 		Password: string(secret.Data["password"]),
 	}
 
-	nfsPatch, err := h.buildNFSPatch(ctx, appName, prNumber, namespace, config)
+	volumePatches, err := h.buildVolumePatches(ctx, appName, prNumber, namespace, config)
 	if err != nil {
 		return err
 	}
 
 	// Regenerate all patches with DB credentials
 	callbackPath := h.discoverOIDCCallbackPath(ctx, appName)
-	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, dbCreds, nfsPatch)
+	allPatches := buildAllPatches(appName, prNumber, namespace, h.previewDomain, config, callbackPath, dbCreds, volumePatches)
 
 	// Update the Kustomization with new patches and mark credentials as patched
 	ks.Spec.Patches = allPatches

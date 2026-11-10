@@ -60,6 +60,9 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "update", "delete"]
 
   # Events for status reporting
   - apiGroups: [""]

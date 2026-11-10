@@ -414,3 +414,35 @@ func TestEnvtest_ConfigVolumeNFSRule(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvtest_NFSVolumesRule(t *testing.T) {
+	cl := requireEnvtest(t)
+	ctx := context.Background()
+
+	config := func(name string, deploymentType previewv1.DeploymentType) *previewv1.PreviewConfig {
+		return &previewv1.PreviewConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: previewv1.PreviewConfigSpec{
+				DeploymentType: deploymentType,
+				NFSVolumes:     []previewv1.NFSVolume{{ClaimName: "media"}},
+				IsolateEgress:  true,
+			},
+		}
+	}
+
+	accepted := config("nfsvolumes-deployment", previewv1.DeploymentTypeDeployment)
+	if err := cl.Create(ctx, accepted); err != nil {
+		t.Fatalf("nfsVolumes with a Deployment must be accepted: %v", err)
+	}
+	t.Cleanup(func() { _ = cl.Delete(ctx, accepted) }) // best-effort: the envtest API server is torn down after the run
+
+	rejected := config("nfsvolumes-helm", previewv1.DeploymentTypeHelm)
+	err := cl.Create(ctx, rejected)
+	if err == nil {
+		_ = cl.Delete(ctx, rejected) // best-effort: the test already failed, this only tidies the shared API server
+		t.Fatal("nfsVolumes with deploymentType: helm must be rejected")
+	}
+	if !strings.Contains(err.Error(), "nfsVolumes supports raw-manifest Deployments only") {
+		t.Fatalf("rejected with the wrong message: %v", err)
+	}
+}
