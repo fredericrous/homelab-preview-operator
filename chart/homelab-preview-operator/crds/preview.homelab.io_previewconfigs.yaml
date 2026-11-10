@@ -248,12 +248,18 @@ spec:
                   properties:
                     claimName:
                       description: ClaimName is the PVC in the production namespace.
+                      maxLength: 253
                       minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                       type: string
                   required:
                   - claimName
                   type: object
+                maxItems: 8
                 type: array
+                x-kubernetes-list-map-keys:
+                - claimName
+                x-kubernetes-list-type: map
               redis:
                 description: Redis configuration for preview
                 properties:

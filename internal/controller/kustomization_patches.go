@@ -415,9 +415,11 @@ func (h *PreviewHandler) buildVolumePatches(ctx context.Context, appName, prNumb
 	if err != nil {
 		return nil, err
 	}
-	if patch, err := generateNFSVolumesPatch(appName, mounts); err != nil {
+	patch, err := generateNFSVolumesPatch(appName, mounts)
+	if err != nil {
 		return nil, err
-	} else if patch != nil {
+	}
+	if patch != nil {
 		patches = append(patches, *patch)
 	}
 	return patches, nil

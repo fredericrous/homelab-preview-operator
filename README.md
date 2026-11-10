@@ -159,6 +159,9 @@ Caveats:
 - In a fenced preview, searches, grabs and notifications fail by design.
 - Each preview rescans the library over the production export.
 - NetworkPolicies are additive: a NetworkPolicy an adopter's manifests render widens the fence.
+- The fence also cuts `sharedServices` (they live in other namespaces): do not combine them.
+- The fence carries `app.kubernetes.io/managed-by: homelab-preview-operator`; turning
+  `isolateEgress` off removes only a policy with that label.
 
 ## PR Comments
 

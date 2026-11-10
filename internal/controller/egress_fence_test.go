@@ -51,10 +51,23 @@ func storedKustomization(t *testing.T, h *PreviewHandler) *kustomizev1.Kustomiza
 	return &ks
 }
 
-func fencedConfig(isolate bool) *v1.PreviewConfig {
+func isolatedPreviewConfig() *v1.PreviewConfig {
 	return &v1.PreviewConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "radarr", Namespace: "radarr"},
-		Spec:       v1.PreviewConfigSpec{IsolateEgress: isolate},
+		Spec:       v1.PreviewConfigSpec{IsolateEgress: true},
+	}
+}
+
+// turnIsolationOff flips the stored PreviewConfig the way an adopter's edit would.
+func turnIsolationOff(t *testing.T, h *PreviewHandler) {
+	t.Helper()
+	var config v1.PreviewConfig
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "radarr", Name: "radarr"}, &config); err != nil {
+		t.Fatal(err)
+	}
+	config.Spec.IsolateEgress = false
+	if err := h.client.Update(context.Background(), &config); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -66,7 +79,7 @@ func getFence(t *testing.T, h *PreviewHandler) (*networkingv1.NetworkPolicy, err
 }
 
 func TestEgressFenceSpecIsExact(t *testing.T) {
-	h := fenceTestHandler(t, interceptor.Funcs{}, fencedConfig(true))
+	h := fenceTestHandler(t, interceptor.Funcs{}, isolatedPreviewConfig())
 	ks := storedKustomization(t, h)
 	if err := h.PrepareKustomization(context.Background(), ks, "radarr"); err != nil {
 		t.Fatal(err)
@@ -94,6 +107,9 @@ func TestEgressFenceSpecIsExact(t *testing.T) {
 	if !reflect.DeepEqual(fence.Spec, want) {
 		t.Fatalf("fence spec = %+v\nwant %+v", fence.Spec, want)
 	}
+	if fence.Labels["app.kubernetes.io/managed-by"] != "homelab-preview-operator" {
+		t.Fatalf("fence labels = %v", fence.Labels)
+	}
 	if ks.Spec.Suspend {
 		t.Fatal("the Kustomization must be unsuspended once the fence exists")
 	}
@@ -109,7 +125,7 @@ func TestEgressFenceExistsBeforeUnsuspend(t *testing.T) {
 		}
 		return c.Update(ctx, obj, opts...)
 	}}
-	h = fenceTestHandler(t, funcs, fencedConfig(true))
+	h = fenceTestHandler(t, funcs, isolatedPreviewConfig())
 	ks := storedKustomization(t, h)
 	if err := h.PrepareKustomization(context.Background(), ks, "radarr"); err != nil {
 		t.Fatal(err)
@@ -127,7 +143,7 @@ func TestEgressFenceCreateFailureFailsClosed(t *testing.T) {
 		}
 		return c.Create(ctx, obj, opts...)
 	}}
-	h := fenceTestHandler(t, funcs, fencedConfig(true))
+	h := fenceTestHandler(t, funcs, isolatedPreviewConfig())
 	ks := storedKustomization(t, h)
 	err := h.PrepareKustomization(context.Background(), ks, "radarr")
 	if !errors.Is(err, boom) {
@@ -138,54 +154,80 @@ func TestEgressFenceCreateFailureFailsClosed(t *testing.T) {
 	}
 }
 
-func TestEgressFenceSecondRunTakesAlreadyExistsPath(t *testing.T) {
-	var creates, updates int
-	funcs := interceptor.Funcs{
-		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if _, ok := obj.(*networkingv1.NetworkPolicy); ok {
-				creates++
-			}
-			return c.Create(ctx, obj, opts...)
-		},
-		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			if _, ok := obj.(*networkingv1.NetworkPolicy); ok {
-				updates++
-			}
-			return c.Update(ctx, obj, opts...)
-		},
-	}
-	h := fenceTestHandler(t, funcs, fencedConfig(true))
-	for run := 0; run < 2; run++ {
-		if err := h.PrepareKustomization(context.Background(), storedKustomization(t, h), "radarr"); err != nil {
-			t.Fatalf("run %d: %v", run, err)
-		}
-	}
-	if creates != 2 || updates != 1 {
-		t.Fatalf("creates=%d updates=%d, want 2 creates (second AlreadyExists) and 1 update", creates, updates)
-	}
-	if _, err := getFence(t, h); err != nil {
+func TestEgressFenceSecondRunRestoresTamperedSpec(t *testing.T) {
+	h := fenceTestHandler(t, interceptor.Funcs{}, isolatedPreviewConfig())
+	if err := h.PrepareKustomization(context.Background(), storedKustomization(t, h), "radarr"); err != nil {
 		t.Fatal(err)
+	}
+	original, err := getFence(t, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSpec := *original.Spec.DeepCopy()
+	original.Spec.Egress = original.Spec.Egress[1:] // drop the DNS rule
+	if err := h.client.Update(context.Background(), original); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.PrepareKustomization(context.Background(), storedKustomization(t, h), "radarr"); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := getFence(t, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restored.Spec, wantSpec) {
+		t.Fatalf("second run must restore the fence spec: %+v", restored.Spec)
 	}
 }
 
 func TestEgressFenceDeletedWhenFlagGoesFalse(t *testing.T) {
-	h := fenceTestHandler(t, interceptor.Funcs{}, fencedConfig(true))
+	h := fenceTestHandler(t, interceptor.Funcs{}, isolatedPreviewConfig())
 	if err := h.PrepareKustomization(context.Background(), storedKustomization(t, h), "radarr"); err != nil {
 		t.Fatal(err)
 	}
-	var config v1.PreviewConfig
-	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "radarr", Name: "radarr"}, &config); err != nil {
-		t.Fatal(err)
-	}
-	config.Spec.IsolateEgress = false
-	if err := h.client.Update(context.Background(), &config); err != nil {
-		t.Fatal(err)
-	}
+	turnIsolationOff(t, h)
 	if err := h.PrepareKustomization(context.Background(), storedKustomization(t, h), "radarr"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := getFence(t, h); !apierrors.IsNotFound(err) {
 		t.Fatalf("fence must be deleted, Get error = %v", err)
+	}
+}
+
+func TestEgressFenceDeleteFailureFailsClosed(t *testing.T) {
+	boom := errors.New("apiserver down")
+	funcs := interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+		if _, ok := obj.(*networkingv1.NetworkPolicy); ok {
+			return boom
+		}
+		return c.Delete(ctx, obj, opts...)
+	}}
+	h := fenceTestHandler(t, funcs, isolatedPreviewConfig())
+	if err := h.PrepareKustomization(context.Background(), storedKustomization(t, h), "radarr"); err != nil {
+		t.Fatal(err)
+	}
+	turnIsolationOff(t, h)
+	ks := storedKustomization(t, h)
+	ks.Spec.Suspend = true
+	err := h.PrepareKustomization(context.Background(), ks, "radarr")
+	if !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want the delete error", err)
+	}
+	if !ks.Spec.Suspend {
+		t.Fatal("a failed fence removal must leave the Kustomization suspended")
+	}
+}
+
+func TestEgressFenceRemovalLeavesUnmanagedPolicy(t *testing.T) {
+	adopters := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: "preview-egress-fence", Namespace: "preview-pr-7"}}
+	notIsolated := isolatedPreviewConfig()
+	notIsolated.Spec.IsolateEgress = false
+	h := fenceTestHandler(t, interceptor.Funcs{}, notIsolated, adopters)
+	if err := h.PrepareKustomization(context.Background(), storedKustomization(t, h), "radarr"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := getFence(t, h); err != nil {
+		t.Fatalf("a policy without the operator's label must be left alone: %v", err)
 	}
 }
 

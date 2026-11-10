@@ -83,6 +83,9 @@ type PreviewConfigSpec struct {
 	// does not render the PVC. configVolume.mode: nfs instead swaps in a temp dir.
 	// Raw-manifest Deployments only.
 	// +optional
+	// +listType=map
+	// +listMapKey=claimName
+	// +kubebuilder:validation:MaxItems=8
 	NFSVolumes []NFSVolume `json:"nfsVolumes,omitempty"`
 
 	// IsolateEgress fences the preview with a NetworkPolicy that allows egress to
@@ -96,6 +99,8 @@ type PreviewConfigSpec struct {
 type NFSVolume struct {
 	// ClaimName is the PVC in the production namespace.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	ClaimName string `json:"claimName"`
 }
 

@@ -127,11 +127,7 @@ func (h *PreviewHandler) PrepareKustomization(ctx context.Context, ks *kustomize
 	}
 
 	// The fence exists before the Kustomization is unsuspended; a failure leaves it suspended.
-	if config.Spec.IsolateEgress {
-		if err := h.ensureEgressFence(ctx, namespace); err != nil {
-			return err
-		}
-	} else if err := h.removeEgressFence(ctx, namespace); err != nil {
+	if err := h.syncEgressFence(ctx, namespace, config); err != nil {
 		return err
 	}
 
@@ -256,6 +252,9 @@ func (h *PreviewHandler) UpdateDBCredentialPatches(ctx context.Context, ks *kust
 
 	volumePatches, err := h.buildVolumePatches(ctx, appName, prNumber, namespace, config)
 	if err != nil {
+		return err
+	}
+	if err := h.syncEgressFence(ctx, namespace, config); err != nil {
 		return err
 	}
 

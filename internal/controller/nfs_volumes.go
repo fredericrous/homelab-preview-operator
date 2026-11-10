@@ -47,7 +47,7 @@ func (h *PreviewHandler) resolveNFSVolumes(ctx context.Context, appName string, 
 		return nil, nil
 	}
 	if config.Spec.DeploymentType == v1.DeploymentTypeHelm {
-		return nil, fmt.Errorf("nfsVolumes supports raw-manifest Deployments only; Helm-rendered Deployments are not patched")
+		return nil, stderrors.New("nfsVolumes supports raw-manifest Deployments only; Helm-rendered Deployments are not patched")
 	}
 	cv := config.Spec.ConfigVolume
 	for _, entry := range config.Spec.NFSVolumes {
@@ -61,13 +61,9 @@ func (h *PreviewHandler) resolveNFSVolumes(ctx context.Context, appName string, 
 		return nil, fmt.Errorf("nfsVolumes: cannot read production Deployment %q in namespace %q: %w", appName, appName, err)
 	}
 
+	// The CRD keys nfsVolumes by claimName (listType=map), so each claim appears once.
 	var mounts []nfsMount
-	seen := map[string]bool{}
 	for _, entry := range config.Spec.NFSVolumes {
-		if seen[entry.ClaimName] {
-			continue
-		}
-		seen[entry.ClaimName] = true
 
 		var volumeNames []string
 		for _, volume := range deployment.Spec.Template.Spec.Volumes {
@@ -97,6 +93,7 @@ func (h *PreviewHandler) resolveNFSVolumes(ctx context.Context, appName string, 
 
 // generateNFSVolumesPatch replaces each claimed volume with an inline read-only nfs volume.
 // nfs.readOnly makes the kubelet mount the export read-only for every container mount.
+// It returns nil when mounts is empty.
 func generateNFSVolumesPatch(appName string, mounts []nfsMount) (*kustomize.Patch, error) {
 	if len(mounts) == 0 {
 		return nil, nil
