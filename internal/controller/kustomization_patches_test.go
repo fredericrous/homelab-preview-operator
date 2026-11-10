@@ -307,7 +307,7 @@ func TestBuildAllPatches(t *testing.T) {
 		},
 	}
 
-	patches := buildAllPatches("openwebui", "7", "preview-pr-7", "daddyshome.fr", config, "/oauth/oidc/callback", nil)
+	patches := buildAllPatches("openwebui", "7", "preview-pr-7", "daddyshome.fr", config, "/oauth/oidc/callback", nil, nil)
 
 	// Should have strip patches + deployment env patch
 	if len(patches) <= len(stripTargets) {
@@ -354,7 +354,7 @@ func TestBuildAllPatchesHelm(t *testing.T) {
 		},
 	}
 
-	patches := buildAllPatches("gitea", "7", "preview-pr-7", "daddyshome.fr", config, "/user/oauth2/Authelia/callback", nil)
+	patches := buildAllPatches("gitea", "7", "preview-pr-7", "daddyshome.fr", config, "/user/oauth2/Authelia/callback", nil, nil)
 
 	foundHelmPatch := false
 	for _, p := range patches {
@@ -388,7 +388,7 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 		},
 	}
 
-	patches := buildAllPatches("nextcloud", "8", "preview-pr-8", "daddyshome.fr", config, "/apps/user_oidc/code", dbCreds)
+	patches := buildAllPatches("nextcloud", "8", "preview-pr-8", "daddyshome.fr", config, "/apps/user_oidc/code", dbCreds, nil)
 
 	// Should have strip patches + valuesFrom strip + helm value patch + postRenderer patch
 	foundValuesFromStrip := false
@@ -443,7 +443,7 @@ func TestBuildAllPatchesHelmWithEnvMapping(t *testing.T) {
 func TestBuildAllPatchesNoConfig(t *testing.T) {
 	config := &v1.PreviewConfig{}
 
-	patches := buildAllPatches("myapp", "1", "preview-pr-1", "daddyshome.fr", config, "/oauth/callback", nil)
+	patches := buildAllPatches("myapp", "1", "preview-pr-1", "daddyshome.fr", config, "/oauth/callback", nil, nil)
 
 	// Should only have strip patches
 	if len(patches) != len(stripTargets) {
@@ -525,7 +525,7 @@ func TestExtraEnvOverridesValueFrom(t *testing.T) {
 			},
 		},
 	}
-	patches := buildAllPatches("application-landscape", "9", "preview-pr-9", "daddyshome.fr", cfg, "", nil)
+	patches := buildAllPatches("application-landscape", "9", "preview-pr-9", "daddyshome.fr", cfg, "", nil, nil)
 	all := ""
 	for _, p := range patches {
 		all += p.Patch + "\n---\n"

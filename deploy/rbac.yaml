@@ -57,6 +57,9 @@ rules:
   - apiGroups: [""]
     resources: ["secrets", "configmaps", "services", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
 
   # Events for status reporting
   - apiGroups: [""]

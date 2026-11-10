@@ -373,3 +373,44 @@ func TestEnvtest_InvalidSpecRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestEnvtest_ConfigVolumeNFSRule(t *testing.T) {
+	cl := requireEnvtest(t)
+	ctx := context.Background()
+
+	config := func(name string, volume previewv1.ConfigVolumeConfig) *previewv1.PreviewConfig {
+		return &previewv1.PreviewConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec:       previewv1.PreviewConfigSpec{ConfigVolume: &volume},
+		}
+	}
+	copySeed := true
+	nfs := &previewv1.NFSConfigVolume{Copy: &copySeed}
+
+	accepted := []*previewv1.PreviewConfig{
+		config("cv-snapshot-without-nfs", previewv1.ConfigVolumeConfig{ClaimName: "c"}),
+		config("cv-nfs-mode", previewv1.ConfigVolumeConfig{ClaimName: "c", Mode: previewv1.ConfigVolumeModeNFS, NFS: nfs}),
+	}
+	for _, pc := range accepted {
+		if err := cl.Create(ctx, pc); err != nil {
+			t.Errorf("%s must be accepted: %v", pc.Name, err)
+			continue
+		}
+		t.Cleanup(func() { _ = cl.Delete(ctx, pc) }) // best-effort: the envtest API server is torn down after the run
+	}
+
+	for _, pc := range []*previewv1.PreviewConfig{
+		config("cv-nfs-with-snapshot-mode", previewv1.ConfigVolumeConfig{ClaimName: "c", Mode: previewv1.ConfigVolumeModeSnapshot, NFS: nfs}),
+		config("cv-nfs-without-mode", previewv1.ConfigVolumeConfig{ClaimName: "c", NFS: nfs}),
+	} {
+		err := cl.Create(ctx, pc)
+		if err == nil {
+			_ = cl.Delete(ctx, pc) // best-effort: the test already failed, this only tidies the shared API server
+			t.Errorf("%s must be rejected", pc.Name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "nfs only applies to mode: nfs") {
+			t.Errorf("%s rejected with the wrong message: %v", pc.Name, err)
+		}
+	}
+}

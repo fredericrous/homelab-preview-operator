@@ -2,6 +2,7 @@
 package v1
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -125,6 +126,7 @@ type DeploymentPatch struct {
 }
 
 // ConfigVolumeConfig defines a config PVC to clone for preview
+// +kubebuilder:validation:XValidation:rule="!has(self.nfs) || (has(self.mode) && self.mode == 'nfs')",message="nfs only applies to mode: nfs"
 type ConfigVolumeConfig struct {
 	// ClaimName is the PVC name in the production namespace to snapshot
 	ClaimName string `json:"claimName"`
@@ -132,6 +134,32 @@ type ConfigVolumeConfig struct {
 	// +optional
 	// +kubebuilder:default=ceph-block-snapshot
 	SnapshotClass string `json:"snapshotClass,omitempty"`
+	// Mode selects how the preview gets its config volume: snapshot (default,
+	// Ceph block PVC clone) or nfs (temp dir, optionally seeded from the NFS export).
+	// +optional
+	// +kubebuilder:validation:Enum=snapshot;nfs
+	Mode ConfigVolumeMode `json:"mode,omitempty"`
+	// NFS tunes mode: nfs. Allowed only with mode: nfs.
+	// +optional
+	NFS *NFSConfigVolume `json:"nfs,omitempty"`
+}
+
+// ConfigVolumeMode selects the config volume strategy.
+type ConfigVolumeMode string
+
+const (
+	ConfigVolumeModeSnapshot ConfigVolumeMode = "snapshot"
+	ConfigVolumeModeNFS      ConfigVolumeMode = "nfs"
+)
+
+// NFSConfigVolume tunes the temp-dir replacement of an NFS-backed config PVC.
+type NFSConfigVolume struct {
+	// Copy seeds the temp dir read-only from the NFS export. Default false: start empty.
+	// +optional
+	Copy *bool `json:"copy,omitempty"`
+	// SizeLimit is the emptyDir sizeLimit. Code applies 256Mi when unset.
+	// +optional
+	SizeLimit *resource.Quantity `json:"sizeLimit,omitempty"`
 }
 
 // PreviewConfigStatus defines the observed state of PreviewConfig

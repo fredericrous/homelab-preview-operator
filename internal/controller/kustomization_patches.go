@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	kustomize "github.com/fluxcd/pkg/apis/kustomize"
 	corev1 "k8s.io/api/core/v1"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	v1 "github.com/fredericrous/homelab-preview-operator/api/v1"
 )
@@ -311,8 +313,99 @@ func generateContainerStripPatch(appName string, removeContainers, removeInitCon
 	}
 }
 
+// generateNFSConfigVolumePatch replaces the app's config PVC volume with an emptyDir and,
+// when nfs.Copy is set, adds the config-seed initContainer that fills it from the NFS export.
+func generateNFSConfigVolumePatch(appName, prNumber, namespace, previewDomain string, nfs *nfsConfigVolume) (*kustomize.Patch, error) {
+	if nfs == nil {
+		return nil, nil
+	}
+	volumes := []map[string]interface{}{{
+		"name":                  nfs.VolumeName,
+		"persistentVolumeClaim": nil,
+		"emptyDir":              map[string]interface{}{"sizeLimit": nfs.SizeLimit.String()},
+	}}
+	podSpec := map[string]interface{}{"volumes": volumes}
+
+	if nfs.Copy {
+		volumes = append(volumes, map[string]interface{}{
+			"name": nfsSeedSourceVolume,
+			"nfs":  map[string]interface{}{"server": nfs.Server, "path": nfs.Path, "readOnly": true},
+		})
+		podSpec["volumes"] = volumes
+		podSpec["initContainers"] = []map[string]interface{}{nfsSeedInitContainer(appName, prNumber, namespace, previewDomain, nfs)}
+	}
+
+	doc := map[string]interface{}{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]interface{}{"name": appName},
+		"spec":       map[string]interface{}{"template": map[string]interface{}{"spec": podSpec}},
+	}
+	out, err := sigsyaml.Marshal(doc)
+	if err != nil {
+		// A dropped patch would leave the production NFS claim mounted read-write.
+		return nil, fmt.Errorf("render the mode: nfs patch for Deployment %q: %w", appName, err)
+	}
+	return &kustomize.Patch{
+		Target: &kustomize.Selector{Kind: "Deployment", Name: appName},
+		Patch:  string(out),
+	}, nil
+}
+
+func nfsSeedInitContainer(appName, prNumber, namespace, previewDomain string, nfs *nfsConfigVolume) map[string]interface{} {
+	limitKiB := nfs.SizeLimit.Value() / 1024
+	env := []map[string]interface{}{
+		{"name": "PROD_NS", "value": appName},
+		{"name": "PREVIEW_NS", "value": namespace},
+		{"name": "DOMAIN", "value": previewDomain},
+		{"name": "PR", "value": prNumber},
+		{"name": "APP", "value": appName},
+		{"name": "SOURCE", "value": nfs.Server + ":" + nfs.Path},
+		{"name": "LIMIT", "value": nfs.SizeLimit.String()},
+		{"name": "LIMIT_KIB", "value": fmt.Sprintf("%d", limitKiB)},
+	}
+	if nfs.RunAsUser != nil {
+		gid := *nfs.RunAsUser
+		if nfs.RunAsGroup != nil {
+			gid = *nfs.RunAsGroup
+		}
+		env = append(env,
+			map[string]interface{}{"name": "SEED_UID", "value": fmt.Sprintf("%d", *nfs.RunAsUser)},
+			map[string]interface{}{"name": "SEED_GID", "value": fmt.Sprintf("%d", gid)},
+		)
+	}
+	return map[string]interface{}{
+		"name":                     nfsSeedContainer,
+		"image":                    "alpine:3.21",
+		"command":                  []string{"/bin/sh", "-c", nfsSeedScript},
+		"env":                      env,
+		"terminationMessagePolicy": string(corev1.TerminationMessageFallbackToLogsOnError),
+		// runAsNonRoot false: the app pod may set it pod-wide, and the seed must run as root to read the export.
+		"securityContext": map[string]interface{}{"runAsUser": 0, "runAsNonRoot": false},
+		"volumeMounts": []map[string]interface{}{
+			{"name": nfs.VolumeName, "mountPath": "/config"},
+			{"name": nfsSeedSourceVolume, "mountPath": "/src", "readOnly": true},
+		},
+		"resources": map[string]interface{}{
+			// The copy lands in the emptyDir (bounded by its sizeLimit); this only covers the container layer and logs.
+			"requests": map[string]interface{}{"cpu": "50m", "memory": "64Mi", "ephemeral-storage": "16Mi"},
+			"limits":   map[string]interface{}{"cpu": "200m", "memory": "128Mi", "ephemeral-storage": "64Mi"},
+		},
+	}
+}
+
+// buildNFSPatch resolves the cluster state mode: nfs needs and renders its Deployment patch.
+// It returns nil when the config does not use mode: nfs.
+func (h *PreviewHandler) buildNFSPatch(ctx context.Context, appName, prNumber, namespace string, config *v1.PreviewConfig) (*kustomize.Patch, error) {
+	nfs, err := h.resolveNFSConfigVolume(ctx, appName, config)
+	if err != nil || nfs == nil {
+		return nil, err
+	}
+	return generateNFSConfigVolumePatch(appName, prNumber, namespace, h.previewDomain, nfs)
+}
+
 // buildAllPatches combines all patch types for a preview Kustomization
-func buildAllPatches(appName, prNumber, namespace, previewDomain string, config *v1.PreviewConfig, callbackPath string, dbCreds *DBCredentials) []kustomize.Patch {
+func buildAllPatches(appName, prNumber, namespace, previewDomain string, config *v1.PreviewConfig, callbackPath string, dbCreds *DBCredentials, nfsPatch *kustomize.Patch) []kustomize.Patch {
 	var allPatches []kustomize.Patch
 
 	// 1. Infrastructure strip patches (remove resources not needed in preview)
@@ -369,6 +462,10 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 				config.Spec.DeploymentPatch.RemoveInitContainers); p != nil {
 				allPatches = append(allPatches, *p)
 			}
+		}
+
+		if nfsPatch != nil {
+			allPatches = append(allPatches, *nfsPatch)
 		}
 
 		if config.Spec.EnvMapping != nil {
