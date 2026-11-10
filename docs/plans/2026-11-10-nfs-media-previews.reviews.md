@@ -1,0 +1,7 @@
+# Full reviews: Previews for NFS media apps
+
+## Full reviews (reference)
+Round 1 (opus): backend 6 (high: rollback relied on an annotation the operator ignores; per-mount readOnly from prod mounts breaks on PR changes), lang:go 6 (high: NetworkPolicy read hits the manager cache; role.yaml is generated), platform 5 (high: pin rollback re-exposes prod PVs; the new strip prunes a PV already in a preview inventory), architect 5 (high: fence blocks the in-namespace smoke test), po 4 (high: patch-agent promotions are the visible outcome; /downloads2 missing), lang:python 3 (high: patch-agent in sre-agent reads the annotation; ImageUnpinned is auto), lang:typescript 0. All accepted; 29 rows recorded.
+Round 2: backend 2 medium, lang:python 1 low, lang:typescript 0.
+Carried into implementation: rollback closes or unlabels open radarr/sonarr preview PRs before deleting namespaces (backend); name Hubble flows (`hubble observe --from-namespace preview-pr-N`) as the egress signal and check it live (backend); word the patch-agent lane as `ImageUnpinned`/`ImageTagMoved` per the live alert policy, and check `check_previewable` returns ok for radarr/sonarr and refuses qbittorrent right after PR C (python).
+Seating note: plan-panel counted this as a delta of the earlier plan at the same path and seated backend, python, typescript; go, platform, architect and po were added for round 1 because this is a new plan.
