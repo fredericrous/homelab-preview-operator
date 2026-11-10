@@ -511,14 +511,14 @@ func (h *PreviewHandler) resolveNFSConfigVolume(ctx context.Context, appName str
 		return nil, fmt.Errorf("configVolume.claimName %q in namespace %q: cannot read PVC: %w", cv.ClaimName, appName, err)
 	}
 	if claim.Spec.VolumeName == "" {
-		return nil, fmt.Errorf("configVolume.claimName %q in namespace %q is not bound to a PV; nfs.copy: true needs a bound NFS PV. Set nfs.copy: false to start empty.", cv.ClaimName, appName)
+		return nil, fmt.Errorf("configVolume.claimName %q in namespace %q is not bound to a PV; nfs.copy: true needs a bound NFS PV. Set nfs.copy: false to start empty", cv.ClaimName, appName)
 	}
 	var volume corev1.PersistentVolume
 	if err := h.client.Get(ctx, types.NamespacedName{Name: claim.Spec.VolumeName}, &volume); err != nil {
 		return nil, fmt.Errorf("configVolume.claimName %q: cannot read PV %q: %w", cv.ClaimName, claim.Spec.VolumeName, err)
 	}
 	if volume.Spec.NFS == nil {
-		return nil, fmt.Errorf("configVolume.claimName %q is bound to PV %q, which has no spec.nfs; nfs.copy: true needs an NFS PV. Set nfs.copy: false to start empty, or use mode: snapshot.", cv.ClaimName, volume.Name)
+		return nil, fmt.Errorf("configVolume.claimName %q is bound to PV %q, which has no spec.nfs; nfs.copy: true needs an NFS PV. Set nfs.copy: false to start empty, or use mode: snapshot", cv.ClaimName, volume.Name)
 	}
 	resolved.Server = volume.Spec.NFS.Server
 	resolved.Path = volume.Spec.NFS.Path
