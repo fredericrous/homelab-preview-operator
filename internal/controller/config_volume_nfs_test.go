@@ -358,14 +358,26 @@ func TestSnapshotRewriteScriptGolden(t *testing.T) {
 	}
 }
 
+// skipOrFailInCI skips a docker-backed test on a laptop without a container runtime, and fails
+// it under CI, where a skip would leave the seed script unproven.
+func skipOrFailInCI(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf("%s; CI must run the seed script tests", reason)
+	}
+	t.Skip(reason)
+}
+
 // runSeedScript runs the seed script in alpine:3.21 (busybox), the image the init container uses.
 func runSeedScript(t *testing.T, src, dst string, env ...string) (string, error) {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker is not available; the seed script needs busybox from alpine:3.21")
+		skipOrFailInCI(t, "docker is not available; the seed script needs busybox from alpine:3.21")
+		return "", nil
 	}
 	if err := exec.Command("docker", "info").Run(); err != nil {
-		t.Skip("docker daemon is not running")
+		skipOrFailInCI(t, "docker daemon is not running")
+		return "", nil
 	}
 	args := []string{"run", "--rm", "-v", src + ":/src:ro", "-v", dst + ":/config",
 		"-e", "PROD_NS=myapp", "-e", "PREVIEW_NS=preview-pr-7", "-e", "DOMAIN=example.test",
@@ -442,7 +454,7 @@ func TestNFSSeedScriptFailsOnUnreadableFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err := runSeedScript(t, src, dst, "--cap-drop=DAC_OVERRIDE", "--cap-drop=DAC_READ_SEARCH")
-	if err == nil || !strings.Contains(out, "root-squashed") {
+	if err == nil || !strings.Contains(out, "cannot copy") || !strings.Contains(out, "root-squashed") {
 		t.Fatalf("expected a root-squash failure, got err=%v out=%s", err, out)
 	}
 }

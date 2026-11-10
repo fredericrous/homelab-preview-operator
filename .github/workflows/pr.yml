@@ -162,6 +162,11 @@ jobs:
           make controller-gen
           make envtest
 
+      # Not gated by the attestation: a laptop without a container runtime skips these
+      # docker-backed tests, so its pre-push attestation does not prove the busybox seed script.
+      - name: Seed script tests (busybox)
+        run: go test ./internal/controller -run 'TestNFSSeedScript' -count=1 -v
+
       - name: Run unit tests with coverage
         id: unit_tests
         if: ${{ !contains(fromJSON(steps.attest.outputs.gates), 'pre-push-go-test') }}

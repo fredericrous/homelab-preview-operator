@@ -431,7 +431,9 @@ const (
 	nfsSeedSourceVolume = "config-seed-src"
 )
 
-// nfsConfigVolume is the resolved input of the mode: nfs Deployment patch.
+// nfsConfigVolume is the resolved input of the mode: nfs Deployment patch. VolumeName and
+// SizeLimit are always set; Server, Path, PVName, RunAsUser and RunAsGroup are meaningful
+// only when Copy is true (resolveNFSConfigVolume is the only constructor).
 type nfsConfigVolume struct {
 	// VolumeName is the production Deployment's volume that claimed the config PVC.
 	VolumeName string
@@ -558,13 +560,15 @@ func appRunAsIDs(deployment *appsv1.Deployment, appName string) (user, group *in
 // nfsSeedScript copies the NFS export into the temp dir and rewrites preview URLs. Its inputs
 // arrive as environment variables, so no value is interpolated into shell source.
 const nfsSeedScript = `set -u
+# Best effort: sh runs the trap only after the foreground du/cp returns; the kubelet's
+# SIGKILL after the grace period bounds a hung export.
 trap 'exit 143' TERM INT
 fail() { echo "config-seed: $*" >&2; exit 1; }
 printf 'a\n' | grep -Iq . || fail "grep -I is not supported by this image"
 SRC="${SRC_DIR:-/src}"
 DST="${CONFIG_DIR:-/config}"
 find "$DST" -mindepth 1 -delete || fail "cannot clear $DST"
-SRC_USAGE=$(du -sk "$SRC") || fail "cannot read $SOURCE; the export may be root-squashed; set nfs.copy: false to start empty"
+SRC_USAGE=$(du -sk "$SRC") || fail "cannot size $SOURCE; the export may be root-squashed; set nfs.copy: false to start empty"
 SRC_KIB=${SRC_USAGE%%[!0-9]*}
 case "$SRC_KIB" in ''|*[!0-9]*) fail "cannot size $SOURCE" ;; esac
 if [ "$SRC_KIB" -gt "$LIMIT_KIB" ]; then
