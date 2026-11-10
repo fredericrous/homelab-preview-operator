@@ -92,4 +92,30 @@ Roll back on: a preview verdict that is a false negative caused by the mount or 
   - after teardown, `radarr-media-pv` is still Bound to `radarr/media`.
 - After PR C: the next radarr and sonarr image bumps get a patch-agent promotion PR carrying a preview verdict; qbittorrent is still refused.
 
+## Outcome
+
+Phases 1–4 implemented on `feat/nfs-volumes` (relais run run-65fece1fa0d64-c34a, salvaged as 870dd3d after its reviewer's flag-argument blocker was split by hand; review fixes in ba82b31). Next: release, then homelab PRs A–C (Phases 5–7).
+
+- input: `go build`, `go vet`, `go test ./api/... ./internal/...` → expected: pass → actual: pass.
+- input: pinned `make lint` (golangci-lint v2.11.4) → expected: 0 issues → actual: 0 issues.
+- input: `make manifests generate` → expected: CRDs and role.yaml regenerated, chart CRD identical → actual: CRD gains `nfsVolumes` (listType=map on claimName, maxItems 8, DNS-1123 pattern) and `isolateEgress`; chart copy identical; role.yaml carries networkpolicies get/create/update/delete.
+- input: krusty render of a sample with `media` mounted twice (one `subPath`) and `media2` → expected: inline nfs readOnly volumes, PVCs and PVs deleted, mounts and subPath unchanged → actual: pass (TestNFSVolumesRenderReadOnlyInlineVolumesAndStripClaims); combined with `configVolume.mode: nfs` → pass.
+- input: fence tests → expected: exact spec + managed-by label before unsuspend; create failure and delete failure leave the Kustomization suspended; a tampered fence is restored; flag off removes only the labelled policy → actual: 7/7 pass.
+- input: envtest with cached k8s 1.34.1 assets → expected: CRD accepts the fields, rejects `nfsVolumes` with `deploymentType: helm` → actual: pass (TestEnvtest_NFSVolumesRule and the 7 existing cases).
+- input: spec without the new fields → expected: same config hash as before → actual: pass (TestSpecWithoutNFSOptionsHashesAsBefore).
+- not run before the push: every live homelab check (needs the release and PRs A–B).
+
+## Decision log
+
+- 2026-11-10: the fence is re-synced on both renders (`PrepareKustomization`, `UpdateDBCredentialPatches`), not by a periodic loop: a hand-deleted fence returns on the next render.
+- 2026-11-10: the fence carries `app.kubernetes.io/managed-by: homelab-preview-operator`; turning `isolateEgress` off deletes only a policy with that label. With isolation on, a same-named unlabelled policy is taken over (README states it).
+- 2026-11-10: kept deliberate: no dedicated test for the `UpdateDBCredentialPatches` fence call (the same `syncEgressFence` is covered through `PrepareKustomization`; that path needs a CNPG fixture); `fmt.Errorf` with a constant in `preview_handler.go` (`errors` there is the k8s package); the go profile's cosmetic lows (label-key constant, Info vs V(1), Delete precondition).
+
+## Implementation review
+
+- implementation-review: round 1 approve-with-changes (blocking: `fencedConfig(isolate bool)`, fixed), delta approve. 66k+54k (opus).
+- backend: approve-with-changes (logs, delete-failure test, sharedServices caveat: fixed), delta approve-with-changes (credentials-path test: deliberate). 78k+28k (opus).
+- lang:go: approve-with-changes (listType map + ClaimName validation, behaviour test, style: fixed), delta approve-with-changes (cosmetic lows: deliberate). 62k+32k (opus).
+- platform: approve-with-changes (fence resync on both renders, label-guarded removal, maxItems: fixed), delta approve. 64k+34k (opus).
+
 <!-- panel: repos=homelab-preview-operator,homelab adds=contract reviewers=backend,language,platform,architect,po body-sha=98f30e6c5881 -->
