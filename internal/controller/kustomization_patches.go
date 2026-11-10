@@ -6,6 +6,7 @@ import (
 
 	kustomize "github.com/fluxcd/pkg/apis/kustomize"
 	corev1 "k8s.io/api/core/v1"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	v1 "github.com/fredericrous/homelab-preview-operator/api/v1"
 )
@@ -311,8 +312,87 @@ func generateContainerStripPatch(appName string, removeContainers, removeInitCon
 	}
 }
 
+// generateNFSConfigVolumePatch replaces the app's config PVC volume with an emptyDir and,
+// when nfs.Copy is set, adds the config-seed initContainer that fills it from the NFS export.
+func generateNFSConfigVolumePatch(appName, prNumber, namespace, previewDomain string, nfs *nfsConfigVolume) *kustomize.Patch {
+	if nfs == nil {
+		return nil
+	}
+	volumes := []map[string]interface{}{{
+		"name":                  nfs.VolumeName,
+		"persistentVolumeClaim": nil,
+		"emptyDir":              map[string]interface{}{"sizeLimit": nfs.SizeLimit.String()},
+	}}
+	podSpec := map[string]interface{}{"volumes": volumes}
+
+	if nfs.Copy {
+		volumes = append(volumes, map[string]interface{}{
+			"name": nfsSeedSourceVolume,
+			"nfs":  map[string]interface{}{"server": nfs.Server, "path": nfs.Path, "readOnly": true},
+		})
+		podSpec["volumes"] = volumes
+		podSpec["initContainers"] = []map[string]interface{}{nfsSeedInitContainer(appName, prNumber, namespace, previewDomain, nfs)}
+	}
+
+	doc := map[string]interface{}{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]interface{}{"name": appName},
+		"spec":       map[string]interface{}{"template": map[string]interface{}{"spec": podSpec}},
+	}
+	out, err := sigsyaml.Marshal(doc)
+	if err != nil {
+		return nil
+	}
+	return &kustomize.Patch{
+		Target: &kustomize.Selector{Kind: "Deployment", Name: appName},
+		Patch:  string(out),
+	}
+}
+
+func nfsSeedInitContainer(appName, prNumber, namespace, previewDomain string, nfs *nfsConfigVolume) map[string]interface{} {
+	limitKiB := nfs.SizeLimit.Value() / 1024
+	env := []map[string]interface{}{
+		{"name": "PROD_NS", "value": appName},
+		{"name": "PREVIEW_NS", "value": namespace},
+		{"name": "DOMAIN", "value": previewDomain},
+		{"name": "PR", "value": prNumber},
+		{"name": "APP", "value": appName},
+		{"name": "SOURCE", "value": nfs.Server + ":" + nfs.Path},
+		{"name": "LIMIT", "value": nfs.SizeLimit.String()},
+		{"name": "LIMIT_KIB", "value": fmt.Sprintf("%d", limitKiB)},
+	}
+	if nfs.RunAsUser != nil {
+		gid := *nfs.RunAsUser
+		if nfs.RunAsGroup != nil {
+			gid = *nfs.RunAsGroup
+		}
+		env = append(env,
+			map[string]interface{}{"name": "SEED_UID", "value": fmt.Sprintf("%d", *nfs.RunAsUser)},
+			map[string]interface{}{"name": "SEED_GID", "value": fmt.Sprintf("%d", gid)},
+		)
+	}
+	ephemeral := nfs.SizeLimit.String()
+	return map[string]interface{}{
+		"name":                     nfsSeedContainer,
+		"image":                    "alpine:3.21",
+		"command":                  []string{"/bin/sh", "-c", nfsSeedScript},
+		"env":                      env,
+		"terminationMessagePolicy": string(corev1.TerminationMessageFallbackToLogsOnError),
+		"securityContext":          map[string]interface{}{"runAsUser": 0},
+		"volumeMounts": []map[string]interface{}{
+			{"name": nfs.VolumeName, "mountPath": "/config"},
+			{"name": nfsSeedSourceVolume, "mountPath": "/src", "readOnly": true},
+		},
+		"resources": map[string]interface{}{
+			"requests": map[string]interface{}{"cpu": "50m", "memory": "64Mi", "ephemeral-storage": ephemeral},
+			"limits":   map[string]interface{}{"cpu": "200m", "memory": "128Mi", "ephemeral-storage": ephemeral},
+		},
+	}
+}
+
 // buildAllPatches combines all patch types for a preview Kustomization
-func buildAllPatches(appName, prNumber, namespace, previewDomain string, config *v1.PreviewConfig, callbackPath string, dbCreds *DBCredentials) []kustomize.Patch {
+func buildAllPatches(appName, prNumber, namespace, previewDomain string, config *v1.PreviewConfig, callbackPath string, dbCreds *DBCredentials, nfs *nfsConfigVolume) []kustomize.Patch {
 	var allPatches []kustomize.Patch
 
 	// 1. Infrastructure strip patches (remove resources not needed in preview)
@@ -367,6 +447,12 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 			if p := generateContainerStripPatch(appName,
 				config.Spec.DeploymentPatch.RemoveContainers,
 				config.Spec.DeploymentPatch.RemoveInitContainers); p != nil {
+				allPatches = append(allPatches, *p)
+			}
+		}
+
+		if nfs != nil {
+			if p := generateNFSConfigVolumePatch(appName, prNumber, namespace, previewDomain, nfs); p != nil {
 				allPatches = append(allPatches, *p)
 			}
 		}

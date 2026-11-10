@@ -18,10 +18,18 @@ import (
 	v1 "github.com/fredericrous/homelab-preview-operator/api/v1"
 )
 
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
+// PersistentVolumes are read-only and cluster-wide. The manager client reads through an
+// informer cache, which needs list and watch beside get.
+
 // setupConfigVolume snapshots a production config PVC, clones it into the preview
 // namespace, runs a URL-rewrite Job, and patches the Deployment to use the clone.
 func (h *PreviewHandler) setupConfigVolume(ctx context.Context, namespace, appName, prNumber string, config *v1.PreviewConfig) error {
 	cv := config.Spec.ConfigVolume
+	if cv.Mode == v1.ConfigVolumeModeNFS {
+		// The NFS swap is a Kustomization patch built by buildAllPatches; nothing to create here.
+		return nil
+	}
 	snapshotClass := cv.SnapshotClass
 	if snapshotClass == "" {
 		snapshotClass = "ceph-block-snapshot"
@@ -219,27 +227,7 @@ func (h *PreviewHandler) runURLRewriteJob(ctx context.Context, namespace, appNam
 	ttlSeconds := int32(300)
 	backoffLimit := int32(2)
 	runAsUser := int64(0) // Need root to write to PVC owned by app user
-	rewriteScript := fmt.Sprintf(`set -e
-echo "Rewriting URLs for preview namespace..."
-PROD_NS="%s"
-PREVIEW_NS="%s"
-DOMAIN="%s"
-PR="%s"
-APP="%s"
-
-# Install file command if not present
-apk add --no-cache file >/dev/null 2>&1 || true
-
-find /config -type f | while read -r file; do
-  if file "$file" | grep -qiE 'text|xml|json|ascii|utf-'; then
-    # Rewrite internal FQDNs: .{prodNs}.svc.cluster.local -> .{previewNs}.svc.cluster.local
-    sed -i "s/\.${PROD_NS}\.svc\.cluster\.local/.${PREVIEW_NS}.svc.cluster.local/g" "$file"
-    # Rewrite external URLs: {app}.{domain} -> pr-{pr}-{app}.{domain}
-    sed -i "s/${APP}\.${DOMAIN}/pr-${PR}-${APP}.${DOMAIN}/g" "$file"
-  fi
-done
-echo "URL rewrite complete"
-`, appName, namespace, h.previewDomain, prNumber, appName)
+	rewriteScript := snapshotRewriteScript(appName, namespace, h.previewDomain, prNumber)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -316,6 +304,31 @@ echo "URL rewrite complete"
 	}
 
 	return nil
+}
+
+// snapshotRewriteScript is the URL-rewrite script of the snapshot-mode Job; a golden test pins it.
+func snapshotRewriteScript(appName, namespace, previewDomain, prNumber string) string {
+	return fmt.Sprintf(`set -e
+echo "Rewriting URLs for preview namespace..."
+PROD_NS="%s"
+PREVIEW_NS="%s"
+DOMAIN="%s"
+PR="%s"
+APP="%s"
+
+# Install file command if not present
+apk add --no-cache file >/dev/null 2>&1 || true
+
+find /config -type f | while read -r file; do
+  if file "$file" | grep -qiE 'text|xml|json|ascii|utf-'; then
+    # Rewrite internal FQDNs: .{prodNs}.svc.cluster.local -> .{previewNs}.svc.cluster.local
+    sed -i "s/\.${PROD_NS}\.svc\.cluster\.local/.${PREVIEW_NS}.svc.cluster.local/g" "$file"
+    # Rewrite external URLs: {app}.{domain} -> pr-{pr}-{app}.{domain}
+    sed -i "s/${APP}\.${DOMAIN}/pr-${PR}-${APP}.${DOMAIN}/g" "$file"
+  fi
+done
+echo "URL rewrite complete"
+`, appName, namespace, previewDomain, prNumber, appName)
 }
 
 // patchDeploymentVolume swaps the PVC claim in the Deployment volumes.
@@ -411,3 +424,154 @@ func (h *PreviewHandler) waitForJobCompletion(ctx context.Context, namespace, na
 		}
 	}
 }
+
+const (
+	defaultNFSSizeLimit = "256Mi"
+	nfsSeedContainer    = "config-seed"
+	nfsSeedSourceVolume = "config-seed-src"
+)
+
+// nfsConfigVolume is the resolved input of the mode: nfs Deployment patch.
+type nfsConfigVolume struct {
+	// VolumeName is the production Deployment's volume that claimed the config PVC.
+	VolumeName string
+	SizeLimit  resource.Quantity
+	// Copy is true when the temp dir is seeded from the export.
+	Copy bool
+	// Server and Path are the PV's NFS export; set only when Copy is true.
+	Server string
+	Path   string
+	// PVName is the bound PV; set only when Copy is true.
+	PVName string
+	// RunAsUser and RunAsGroup own the seeded files; nil leaves them world-writable.
+	RunAsUser  *int64
+	RunAsGroup *int64
+}
+
+// resolveNFSConfigVolume reads the cluster state mode: nfs needs before patches are built.
+// It returns nil when the config does not use mode: nfs.
+func (h *PreviewHandler) resolveNFSConfigVolume(ctx context.Context, appName string, config *v1.PreviewConfig) (*nfsConfigVolume, error) {
+	cv := config.Spec.ConfigVolume
+	if cv == nil || cv.Mode != v1.ConfigVolumeModeNFS {
+		return nil, nil
+	}
+	if config.Spec.DeploymentType == v1.DeploymentTypeHelm {
+		return nil, fmt.Errorf("mode: nfs supports raw-manifest Deployments only; Helm-rendered Deployments are not patched")
+	}
+
+	sizeLimit := resource.MustParse(defaultNFSSizeLimit)
+	copySeed := false
+	if cv.NFS != nil {
+		if cv.NFS.SizeLimit != nil {
+			sizeLimit = *cv.NFS.SizeLimit
+		}
+		if cv.NFS.Copy != nil {
+			copySeed = *cv.NFS.Copy
+		}
+	}
+
+	var deployment appsv1.Deployment
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: appName, Name: appName}, &deployment); err != nil {
+		return nil, fmt.Errorf("configVolume.claimName %q: cannot read production Deployment %q in namespace %q: %w", cv.ClaimName, appName, appName, err)
+	}
+	volumeName := ""
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == cv.ClaimName {
+			volumeName = volume.Name
+			break
+		}
+	}
+	if volumeName == "" {
+		return nil, fmt.Errorf("configVolume.claimName %q is not used as a persistentVolumeClaim volume by Deployment %q in namespace %q", cv.ClaimName, appName, appName)
+	}
+
+	resolved := &nfsConfigVolume{VolumeName: volumeName, SizeLimit: sizeLimit, Copy: copySeed}
+	if !copySeed {
+		h.log.Info("NFS config volume patched", "app", appName, "copy", false, "pv", "")
+		return resolved, nil
+	}
+
+	var claim corev1.PersistentVolumeClaim
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: appName, Name: cv.ClaimName}, &claim); err != nil {
+		return nil, fmt.Errorf("configVolume.claimName %q in namespace %q: cannot read PVC: %w", cv.ClaimName, appName, err)
+	}
+	if claim.Spec.VolumeName == "" {
+		return nil, fmt.Errorf("configVolume.claimName %q in namespace %q is not bound to a PV; nfs.copy: true needs a bound NFS PV. Set nfs.copy: false to start empty.", cv.ClaimName, appName)
+	}
+	var volume corev1.PersistentVolume
+	if err := h.client.Get(ctx, types.NamespacedName{Name: claim.Spec.VolumeName}, &volume); err != nil {
+		return nil, fmt.Errorf("configVolume.claimName %q: cannot read PV %q: %w", cv.ClaimName, claim.Spec.VolumeName, err)
+	}
+	if volume.Spec.NFS == nil {
+		return nil, fmt.Errorf("configVolume.claimName %q is bound to PV %q, which has no spec.nfs; nfs.copy: true needs an NFS PV. Set nfs.copy: false to start empty, or use mode: snapshot.", cv.ClaimName, volume.Name)
+	}
+	resolved.Server = volume.Spec.NFS.Server
+	resolved.Path = volume.Spec.NFS.Path
+	resolved.PVName = volume.Name
+	resolved.RunAsUser, resolved.RunAsGroup = appRunAsIDs(&deployment, appName)
+
+	h.log.Info("NFS config volume patched", "app", appName, "copy", true, "pv", volume.Name)
+	return resolved, nil
+}
+
+// appRunAsIDs returns the uid and gid the app runs as: the app container's securityContext,
+// else the pod's. The app container is the one named after the app, else the first.
+func appRunAsIDs(deployment *appsv1.Deployment, appName string) (user, group *int64) {
+	podSpec := deployment.Spec.Template.Spec
+	if podSpec.SecurityContext != nil {
+		user, group = podSpec.SecurityContext.RunAsUser, podSpec.SecurityContext.RunAsGroup
+	}
+	var app *corev1.Container
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == appName {
+			app = &podSpec.Containers[i]
+			break
+		}
+	}
+	if app == nil && len(podSpec.Containers) > 0 {
+		app = &podSpec.Containers[0]
+	}
+	if app != nil && app.SecurityContext != nil {
+		if app.SecurityContext.RunAsUser != nil {
+			user = app.SecurityContext.RunAsUser
+		}
+		if app.SecurityContext.RunAsGroup != nil {
+			group = app.SecurityContext.RunAsGroup
+		}
+	}
+	return user, group
+}
+
+// nfsSeedScript copies the NFS export into the temp dir and rewrites preview URLs. Its inputs
+// arrive as environment variables, so no value is interpolated into shell source.
+const nfsSeedScript = `set -u
+fail() { echo "config-seed: $*" >&2; exit 1; }
+SRC="${SRC_DIR:-/src}"
+DST="${CONFIG_DIR:-/config}"
+find "$DST" -mindepth 1 -delete || fail "cannot clear $DST"
+SRC_KIB=$(du -sk "$SRC" | cut -f1) || fail "cannot read $SOURCE; the export may be root-squashed; set nfs.copy: false to start empty"
+if [ "$SRC_KIB" -gt "$LIMIT_KIB" ]; then
+  fail "source $SOURCE is $((SRC_KIB / 1024))Mi, over sizeLimit $LIMIT; raise configVolume.nfs.sizeLimit or set nfs.copy: false"
+fi
+cp -a "$SRC"/. "$DST"/ || fail "cannot copy $SOURCE; the export may be root-squashed; set nfs.copy: false to start empty"
+export PROD_NS PREVIEW_NS DOMAIN PR APP
+find "$DST" -type f -exec sh -c '
+  for file in "$@"; do
+    grep -Iq . "$file"
+    status=$?
+    if [ "$status" -eq 1 ]; then continue; fi
+    if [ "$status" -ge 2 ]; then
+      echo "config-seed: cannot read $file; the export may be root-squashed; set nfs.copy: false to start empty" >&2
+      exit 1
+    fi
+    sed -i "s/\.${PROD_NS}\.svc\.cluster\.local/.${PREVIEW_NS}.svc.cluster.local/g" "$file" || exit 1
+    sed -i "s/${APP}\.${DOMAIN}/pr-${PR}-${APP}.${DOMAIN}/g" "$file" || exit 1
+  done
+' sh {} + || fail "URL rewrite failed"
+if [ -n "${SEED_UID:-}" ]; then
+  chown -R "$SEED_UID:${SEED_GID:-$SEED_UID}" "$DST" || fail "cannot chown $DST"
+else
+  chmod -R a+rwX "$DST" || fail "cannot chmod $DST"
+fi
+echo "config-seed: seeded from $SOURCE"
+`

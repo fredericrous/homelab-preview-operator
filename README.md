@@ -85,6 +85,43 @@ spec:
     redisHost: app.config.redis.host
 ```
 
+### Config volumes on NFS
+
+`configVolume` clones a Ceph block PVC by snapshot (`mode: snapshot`, the default). NFS has no
+snapshots, so an NFS-backed config PVC uses `mode: nfs`: the preview runs on a temp dir
+(`emptyDir`) that is empty by default and seeded from the share only on request. The share is
+never cloned or written.
+
+```yaml
+spec:
+  configVolume:
+    claimName: myapp-config
+    mode: nfs
+    nfs:               # allowed only with mode: nfs
+      copy: false      # default false: start empty. true: seed from the share, read-only
+      sizeLimit: 256Mi # emptyDir sizeLimit (default 256Mi)
+```
+
+The swap is a patch on the preview Kustomization, so a Flux reconcile keeps it. It supports
+`deploymentType: deployment` only; `helm` is refused. With `copy: true`, a `config-seed`
+initContainer mounts the export of the production PVC's PV read-only, copies it into the temp
+dir, rewrites the same URLs as snapshot mode and chowns the files to the app's uid/gid. A seed
+failure shows as `Init:Error`; read it with `kubectl logs <pod> -c config-seed`.
+
+Caveats:
+
+- A root-squashed export fails the seed on any file root cannot read. Use `copy: false`.
+- Every pod (re)start re-reads the whole share over the node uplink (about 90 s per GiB); the
+  temp dir is ephemeral by design.
+- `copy: true` puts production config in a PR preview namespace, so it must hold no secrets;
+  the rewrite only touches URLs.
+- An image whose non-root uid comes only from its `USER` needs `runAsUser` set in the
+  Deployment for the seed to chown to it.
+- The Deployment's volume is replaced under its original name. Renaming that volume in the
+  production Deployment changes what the patch targets.
+- The operator needs `get` (and `list`/`watch` for its cache) on `persistentvolumes`,
+  cluster-wide and read-only.
+
 ## PR Comments
 
 When a preview environment is ready, the operator posts (and later updates) a
