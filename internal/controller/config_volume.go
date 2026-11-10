@@ -186,7 +186,8 @@ func (h *PreviewHandler) setupConfigVolume(ctx context.Context, namespace, appNa
 		},
 	}
 
-	if err := h.createOrUpdateTyped(ctx, pvc); err != nil {
+	// Create-only: a retry finds the clone already bound, and a bound claim's spec is immutable.
+	if err := h.createIfAbsent(ctx, pvc); err != nil {
 		return fmt.Errorf("failed to create cloned PVC: %w", err)
 	}
 

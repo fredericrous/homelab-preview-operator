@@ -556,7 +556,7 @@ func (h *PreviewHandler) setupS3Proxy(ctx context.Context, namespace, bucket, pr
 		},
 	}
 
-	if err := h.createOrUpdateTyped(ctx, pvc); err != nil {
+	if err := h.createIfAbsent(ctx, pvc); err != nil {
 		return fmt.Errorf("failed to create PVC: %w", err)
 	}
 
@@ -1215,6 +1215,18 @@ func (h *PreviewHandler) createOrUpdateTyped(ctx context.Context, obj client.Obj
 			obj.SetResourceVersion(existing.GetResourceVersion())
 			return h.client.Update(ctx, obj)
 		}
+		return err
+	}
+	return nil
+}
+
+// createIfAbsent creates obj and leaves an existing one untouched. Use it for objects whose spec
+// is immutable once bound, i.e. a PersistentVolumeClaim: createOrUpdateTyped would Update the
+// existing claim on every retry of the surrounding setup, and the API server refuses
+// ("spec is immutable") because the request carries no volumeName while the bound claim does.
+// That wedged every retried preview whose config-volume clone had already been created.
+func (h *PreviewHandler) createIfAbsent(ctx context.Context, obj client.Object) error {
+	if err := h.client.Create(ctx, obj); err != nil && !errors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil
