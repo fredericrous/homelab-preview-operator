@@ -165,7 +165,9 @@ Phases 1–5 implemented on `feat/nfs-config-volume` (relais run run-65fe96a44b2
 - input: krusty render of the nfs patch over a sample Deployment (copy false / copy true) → expected: emptyDir with sizeLimit, no persistentVolumeClaim; copy true adds a read-only nfs volume, read-only `/src` mount, `config-seed` with `runAsNonRoot: false` → actual: pass (TestNFSPatchWithoutCopyIsAnEmptyDir, TestNFSPatchWithCopyAddsReadOnlySourceAndSeed).
 - input: resolver errors (helm, non-NFS PV, unbound PVC, volume not mounted, init container on the volume, sizeLimit 0), nfs in `Process`, `setupConfigVolume` skipping nfs, snapshot script golden → expected: each its own message; snapshot script byte-identical → actual: pass.
 - input: envtest with KUBEBUILDER_ASSETS = cached 1.34.1 → expected: CRD accepted; snapshot config without `nfs` accepted; `nfs` with mode snapshot or no mode rejected with `nfs only applies to mode: nfs` → actual: pass (TestEnvtest_ConfigVolumeNFSRule, and the six existing envtest cases).
-- input: the three busybox seed tests (rewrite once and skip binaries, over-limit abort, unreadable file under --cap-drop) on this laptop → expected: run in alpine:3.21 → actual: SKIPPED, no container runtime running here; with `CI=true` they fail instead of skipping. They run in the new unconditional PR step "Seed script tests (busybox)", whose log is read for three `--- PASS` before merge.
+- input: the three busybox seed tests (rewrite once and skip binaries, over-limit abort, unreadable file under --cap-drop) on this laptop → expected: run in alpine:3.21 → actual: SKIPPED, no container runtime running here; with `CI=true` they fail instead of skipping.
+- input: the same three tests in PR #40's "Seed script tests (busybox)" step (ubuntu-latest, docker, CI set; run 42824062229, head 2983a13) → expected: three `--- PASS`, no SKIP → actual: PASS, PASS, PASS (4.35 s, 0.29 s, 0.25 s), which also proves busybox `grep -I`, `find -mindepth -delete` and `--cap-drop` behave as the script needs.
+- input: PR #40's first CI run → expected: green → actual: golangci-lint failed on ST1005 (two error strings ending in a period at config_volume.go:514, :521); fixed in bbddadd; pinned golangci-lint v2.11.4 `make lint` → 0 issues.
 - not run before the push: every live homelab check in Verification (needs the released operator and an NFS-backed app's PR preview).
 
 ## Decision log
@@ -176,10 +178,10 @@ Phases 1–5 implemented on `feat/nfs-config-volume` (relais run run-65fe96a44b2
 
 ## Implementation review
 
-- implementation-review: round 1 approve-with-changes (3 blocking: swallowed marshal error, undocumented discards, verification record), all fixed; delta 2 approve. 103k+37k+30k, 115+30+21 s (opus).
+- implementation-review: round 1 approve-with-changes (3 blocking: swallowed marshal error, undocumented discards, verification record), all fixed; delta 2 approve; delta 3 (lint fix) approve. 103k+37k+30k+28k (opus).
 - backend: approve-with-changes, then high (seed tests never ran) fixed with the CI step; approve. 63k+33k+24k (opus).
-- lang:go: approve-with-changes, then approve; deliberate: `Copy` flag kept, unreachable `return` after skipOrFailInCI. 68k+29k+21k (opus).
-- platform: approve-with-changes (high: runAsNonRoot inheritance, fixed); deliberate: digest pin follow-up, no report-table row for the seed step. 63k+32k+31k (opus).
+- lang:go: approve-with-changes, then approve; deliberate: `Copy` flag kept, unreachable `return` after skipOrFailInCI; its low on trailing periods was wrongly kept and failed CI lint, fixed. 68k+29k+21k (opus).
+- platform: approve-with-changes (high: runAsNonRoot inheritance, fixed), then approve; deliberate: digest pin follow-up, no report-table row for the seed step. 63k+32k+31k+23k (opus).
 - unix: approve-with-changes (du status, grep -I probe, TERM trap, rounding: fixed), then approve. 44k+29k+27k (opus).
 
 <!-- panel: repos=homelab-preview-operator adds=contract reviewers=backend,language,platform,unix,tui,architect,po body-sha=9e1448352973 -->
