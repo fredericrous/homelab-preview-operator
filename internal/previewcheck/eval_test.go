@@ -35,6 +35,9 @@ func TestParseImage(t *testing.T) {
 
 func TestMatchesImage(t *testing.T) {
 	ghcr := Artifact{Registry: "ghcr.io", Repository: "fredericrous/navidrome", Tag: "0.55.0", Digest: "sha256:aaa"}
+	hub := Artifact{Registry: "index.docker.io", Repository: "linuxserver/prowlarr", Tag: "linuxserver/prowlarr:2.7.0", Digest: "sha256:431d"}
+	hubPlainTag := Artifact{Registry: "index.docker.io", Repository: "linuxserver/prowlarr", Tag: "2.7.0"}
+	official := Artifact{Registry: "index.docker.io", Repository: "library/alpine", Tag: "3.23.3"}
 	cases := []struct {
 		name string
 		art  Artifact
@@ -53,6 +56,20 @@ func TestMatchesImage(t *testing.T) {
 		{"digest pin ignores a stale tag", ghcr, "fredericrous/navidrome:0.1.0@sha256:aaa", true},
 		{"digest pin with a different digest", ghcr, "fredericrous/navidrome@sha256:bbb", false},
 		{"empty want never matches", ghcr, "", false},
+
+		// Docker Hub, as trivy-operator reports it for a digest-pinned workload
+		// (prowlarr preview of PR 1138): registry index.docker.io, and the whole
+		// reference in the tag field.
+		{"docker hub aliases are one registry", hub, "docker.io/linuxserver/prowlarr:2.7.0", true},
+		{"docker hub registry-1 alias", hub, "registry-1.docker.io/linuxserver/prowlarr:2.7.0", true},
+		{"docker hub without a registry", hub, "linuxserver/prowlarr:2.7.0", true},
+		{"docker hub wrong tag", hub, "docker.io/linuxserver/prowlarr:2.3.0", false},
+		{"docker hub is not ghcr", hub, "ghcr.io/linuxserver/prowlarr:2.7.0", false},
+		{"docker hub plain tag field", hubPlainTag, "docker.io/linuxserver/prowlarr:2.7.0", true},
+		{"official image reported as library/", official, "docker.io/alpine:3.23.3", true},
+		{"official image without a registry", official, "alpine:3.23.3", true},
+		{"official image wrong name", official, "docker.io/busybox:3.23.3", false},
+		{"a ghcr repo named like an official one is not matched", Artifact{Registry: "ghcr.io", Repository: "alpine", Tag: "3.23.3"}, "docker.io/alpine:3.23.3", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

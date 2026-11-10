@@ -103,16 +103,58 @@ func MatchesImage(a Artifact, want string) bool {
 	if w.Digest != "" {
 		return a.Digest != "" && strings.EqualFold(a.Digest, w.Digest)
 	}
-	if w.Repository == "" || !strings.EqualFold(a.Repository, w.Repository) {
+	if w.Repository == "" || !sameRepository(a, w) {
 		return false
 	}
-	if w.Registry != "" && !strings.EqualFold(a.Registry, w.Registry) {
+	if w.Registry != "" && canonicalRegistry(a.Registry) != canonicalRegistry(w.Registry) {
 		return false
 	}
 	if w.Tag != "" {
-		return a.Tag == w.Tag
+		return artifactTag(a) == w.Tag
 	}
 	return true
+}
+
+// canonicalRegistry folds Docker Hub's several names into one. trivy-operator reports a
+// Docker Hub image as `index.docker.io` while a pod spec, the PR and sre-agent say `docker.io`
+// (the API host is `registry-1.docker.io`); all three are the same registry.
+func canonicalRegistry(registry string) string {
+	switch r := strings.ToLower(registry); r {
+	case "index.docker.io", "registry-1.docker.io", "registry.hub.docker.com":
+		return "docker.io"
+	default:
+		return r
+	}
+}
+
+// sameRepository compares repositories case-insensitively. On Docker Hub an official image
+// is reported as `library/nginx` but written `nginx`, so a single-segment name is compared
+// with its `library/` form when the artifact is a Docker Hub one.
+func sameRepository(a Artifact, w ImageRef) bool {
+	if strings.EqualFold(a.Repository, w.Repository) {
+		return true
+	}
+	if canonicalRegistry(a.Registry) != "docker.io" || (w.Registry != "" && canonicalRegistry(w.Registry) != "docker.io") {
+		return false
+	}
+	return strings.EqualFold(withLibrary(a.Repository), withLibrary(w.Repository))
+}
+
+func withLibrary(repository string) string {
+	if strings.Contains(repository, "/") {
+		return repository
+	}
+	return "library/" + repository
+}
+
+// artifactTag is the artifact's tag proper. For a digest-pinned workload trivy-operator records
+// the whole reference there (`linuxserver/prowlarr:2.7.0`), and a tag can never contain a colon,
+// so everything after the last one is the tag.
+func artifactTag(a Artifact) string {
+	if colon := strings.LastIndex(a.Tag, ":"); colon >= 0 {
+		return a.Tag[colon+1:]
+	}
+	return a.Tag
 }
 
 // ExtractCVEs keeps only real CVE ids, de-duplicated and sorted, and returns
