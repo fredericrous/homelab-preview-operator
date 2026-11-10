@@ -156,5 +156,31 @@ path, which fails on NFS), then roll the operator back.
   `preview.homelab.io/config-hash` is unchanged after the CRD apply.
 Work in a worktree from origin/main, one PR.
 
+## Outcome
+
+Phases 1–5 implemented on `feat/nfs-config-volume` (relais run run-65fe96a44b284-80a2, sonnet, approved after its go.mod/go.sum change was read: kustomize/api + kyaml, test-only, five indirect libraries). Live homelab checks are the next phase.
+
+- input: `go build ./...`, `go vet ./...`, `go test ./api/... ./internal/...` → expected: pass → actual: pass.
+- input: `make manifests generate` on the committed tree → expected: no diff; chart CRD equals config CRD → actual: no diff; `diff -q` identical.
+- input: krusty render of the nfs patch over a sample Deployment (copy false / copy true) → expected: emptyDir with sizeLimit, no persistentVolumeClaim; copy true adds a read-only nfs volume, read-only `/src` mount, `config-seed` with `runAsNonRoot: false` → actual: pass (TestNFSPatchWithoutCopyIsAnEmptyDir, TestNFSPatchWithCopyAddsReadOnlySourceAndSeed).
+- input: resolver errors (helm, non-NFS PV, unbound PVC, volume not mounted, init container on the volume, sizeLimit 0), nfs in `Process`, `setupConfigVolume` skipping nfs, snapshot script golden → expected: each its own message; snapshot script byte-identical → actual: pass.
+- input: envtest with KUBEBUILDER_ASSETS = cached 1.34.1 → expected: CRD accepted; snapshot config without `nfs` accepted; `nfs` with mode snapshot or no mode rejected with `nfs only applies to mode: nfs` → actual: pass (TestEnvtest_ConfigVolumeNFSRule, and the six existing envtest cases).
+- input: the three busybox seed tests (rewrite once and skip binaries, over-limit abort, unreadable file under --cap-drop) on this laptop → expected: run in alpine:3.21 → actual: SKIPPED, no container runtime running here; with `CI=true` they fail instead of skipping. They run in the new unconditional PR step "Seed script tests (busybox)", whose log is read for three `--- PASS` before merge.
+- not run before the push: every live homelab check in Verification (needs the released operator and an NFS-backed app's PR preview).
+
+## Decision log
+
+- 2026-11-10: PV RBAC is `get`, `list`, `watch`, not `get` alone: the manager client reads through an informer cache, which needs list and watch. Read-only and cluster-wide; PVs carry no secret values.
+- 2026-11-10: the seed tests run in their own PR step, not in the attestation-gated unit-test step: a laptop without a container runtime skips them, so its pre-push attestation does not prove them.
+- 2026-11-10: kept deliberate: `alpine:3.21` by tag (matches the snapshot Job; digest pin of both is a follow-up); the `NFS config volume patched` log line inside the resolver; `nfsConfigVolume` keeps a `Copy` flag (unexported, one constructor, documented).
+
+## Implementation review
+
+- implementation-review: round 1 approve-with-changes (3 blocking: swallowed marshal error, undocumented discards, verification record), all fixed; delta 2 approve. 103k+37k+30k, 115+30+21 s (opus).
+- backend: approve-with-changes, then high (seed tests never ran) fixed with the CI step; approve. 63k+33k+24k (opus).
+- lang:go: approve-with-changes, then approve; deliberate: `Copy` flag kept, unreachable `return` after skipOrFailInCI. 68k+29k+21k (opus).
+- platform: approve-with-changes (high: runAsNonRoot inheritance, fixed); deliberate: digest pin follow-up, no report-table row for the seed step. 63k+32k+31k (opus).
+- unix: approve-with-changes (du status, grep -I probe, TERM trap, rounding: fixed), then approve. 44k+29k+27k (opus).
+
 <!-- panel: repos=homelab-preview-operator adds=contract reviewers=backend,language,platform,unix,tui,architect,po body-sha=9e1448352973 -->
 
