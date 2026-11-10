@@ -1,0 +1,20 @@
+amont-provenance-v1
+commit 2983a13f7e71be244967fc5f15ba98c2b2c69248
+tree 4592d6924c02302befb6c5feaf29ba8e589cd0e5
+canon 8dcce2e2b5c879592fc0a1c14d4f9a636ae4f83c
+patch 69787912bcfff8bb7db11638284d17b541eb6045
+plan docs/plans/2026-11-10-nfs-config-volume.md 71c183f468c124c83c550f6d8352308bad0336d2643756d4966b0f557d8a1102
+review reviewed 4ca5cdfd4ed51b4bd80902613bf596ee3f0b3af79b0a8c82b8b4e07376b3709b
+code-review backend reviewed 4ca5cdfd4ed51b4bd80902613bf596ee3f0b3af79b0a8c82b8b4e07376b3709b
+code-review lang:go reviewed 4ca5cdfd4ed51b4bd80902613bf596ee3f0b3af79b0a8c82b8b4e07376b3709b
+code-review platform reviewed 4ca5cdfd4ed51b4bd80902613bf596ee3f0b3af79b0a8c82b8b4e07376b3709b
+code-review unix reviewed 4ca5cdfd4ed51b4bd80902613bf596ee3f0b3af79b0a8c82b8b4e07376b3709b
+preview not-required
+producer amont-agent 3.28.0
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg7UOvJ8myo4dhW907VFty7T/bUV
+RFQerK+MWJ4bjChwcAAAAQYW1vbnQtcHJvdmVuYW5jZQAAAAAAAAAGc2hhNTEyAAAAUwAA
+AAtzc2gtZWQyNTUxOQAAAECaNWqtSZTjXi+s45S9J+Qcnx11cM1PzhmfYk6jkW8MUpX3qx
+2Ge5LCNUxxucPjX9+d5mqhzZYZ99xzisuD324O
+-----END SSH SIGNATURE-----
