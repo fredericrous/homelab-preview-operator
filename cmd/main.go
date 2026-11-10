@@ -7,6 +7,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -114,7 +115,7 @@ func main() {
 				// by RequeueAfter, and caching every Job and Pod in the cluster
 				// to watch four of them would cost far more memory than the
 				// polling costs API calls.
-				DisableFor: []client.Object{&batchv1.Job{}, &corev1.Pod{}},
+				DisableFor: []client.Object{&batchv1.Job{}, &corev1.Pod{}, &networkingv1.NetworkPolicy{}},
 			},
 		},
 	})

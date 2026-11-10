@@ -107,6 +107,15 @@ rules:
   - list
   - watch
 - apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - update
+- apiGroups:
   - gateway.networking.k8s.io
   resources:
   - httproutes

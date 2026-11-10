@@ -24,6 +24,7 @@ type PreviewConfig struct {
 }
 
 // PreviewConfigSpec defines the desired preview configuration
+// +kubebuilder:validation:XValidation:rule="!has(self.nfsVolumes) || size(self.nfsVolumes) == 0 || !has(self.deploymentType) || self.deploymentType != 'helm'",message="nfsVolumes supports raw-manifest Deployments only, not deploymentType: helm"
 type PreviewConfigSpec struct {
 	// DeploymentType specifies how the app is deployed
 	// +kubebuilder:validation:Enum=deployment;helm
@@ -76,6 +77,31 @@ type PreviewConfigSpec struct {
 	// (the repo-write `forgejo-git-token`, `litellm-secrets`) through this field.
 	// +optional
 	SmokeTest *SmokeTestConfig `json:"smokeTest,omitempty"`
+
+	// NFSVolumes lists production PVCs bound to static NFS PersistentVolumes. The
+	// preview mounts the same export read-only through an inline nfs volume and
+	// does not render the PVC. configVolume.mode: nfs instead swaps in a temp dir.
+	// Raw-manifest Deployments only.
+	// +optional
+	// +listType=map
+	// +listMapKey=claimName
+	// +kubebuilder:validation:MaxItems=8
+	NFSVolumes []NFSVolume `json:"nfsVolumes,omitempty"`
+
+	// IsolateEgress fences the preview with a NetworkPolicy that allows egress to
+	// kube-dns and to the preview namespace only. The fence is created before the
+	// preview is unsuspended.
+	// +optional
+	IsolateEgress bool `json:"isolateEgress,omitempty"`
+}
+
+// NFSVolume names a production PVC whose NFS export the preview mounts read-only.
+type NFSVolume struct {
+	// ClaimName is the PVC in the production namespace.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	ClaimName string `json:"claimName"`
 }
 
 // SmokeTestConfig is a per-app smoke test Job.

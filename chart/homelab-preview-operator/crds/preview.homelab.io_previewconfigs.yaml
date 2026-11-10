@@ -230,6 +230,36 @@ spec:
                   s3SecretKey:
                     type: string
                 type: object
+              isolateEgress:
+                description: |-
+                  IsolateEgress fences the preview with a NetworkPolicy that allows egress to
+                  kube-dns and to the preview namespace only. The fence is created before the
+                  preview is unsuspended.
+                type: boolean
+              nfsVolumes:
+                description: |-
+                  NFSVolumes lists production PVCs bound to static NFS PersistentVolumes. The
+                  preview mounts the same export read-only through an inline nfs volume and
+                  does not render the PVC. configVolume.mode: nfs instead swaps in a temp dir.
+                  Raw-manifest Deployments only.
+                items:
+                  description: NFSVolume names a production PVC whose NFS export the
+                    preview mounts read-only.
+                  properties:
+                    claimName:
+                      description: ClaimName is the PVC in the production namespace.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                  required:
+                  - claimName
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - claimName
+                x-kubernetes-list-type: map
               redis:
                 description: Redis configuration for preview
                 properties:
@@ -313,6 +343,11 @@ spec:
                 - enabled
                 type: object
             type: object
+            x-kubernetes-validations:
+            - message: 'nfsVolumes supports raw-manifest Deployments only, not deploymentType:
+                helm'
+              rule: '!has(self.nfsVolumes) || size(self.nfsVolumes) == 0 || !has(self.deploymentType)
+                || self.deploymentType != ''helm'''
           status:
             description: PreviewConfigStatus defines the observed state of PreviewConfig
             properties:

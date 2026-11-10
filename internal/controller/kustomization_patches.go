@@ -36,6 +36,8 @@ var stripTargets = []infrastructureStripTarget{
 	{Group: "batch", Kind: "Job"},
 	{Group: "generators.external-secrets.io", Kind: "Password"},
 	{Group: "postgresql.cnpg.io", Kind: "Database"},
+	// Prod's static PersistentVolumes are cluster-scoped; a prune of the preview must never delete them.
+	{Group: "", Kind: "PersistentVolume"},
 }
 
 // generateStripPatches produces $patch: delete patches for all infrastructure resources
@@ -394,22 +396,42 @@ func nfsSeedInitContainer(appName, prNumber, namespace, previewDomain string, nf
 	}
 }
 
-// buildNFSPatch resolves the cluster state mode: nfs needs and renders its Deployment patch.
-// It returns nil when the config does not use mode: nfs.
-func (h *PreviewHandler) buildNFSPatch(ctx context.Context, appName, prNumber, namespace string, config *v1.PreviewConfig) (*kustomize.Patch, error) {
+// buildVolumePatches resolves the cluster state the NFS options need and renders their
+// Deployment patches: the configVolume mode: nfs swap and the nfsVolumes mounts.
+func (h *PreviewHandler) buildVolumePatches(ctx context.Context, appName, prNumber, namespace string, config *v1.PreviewConfig) ([]kustomize.Patch, error) {
+	var patches []kustomize.Patch
 	nfs, err := h.resolveNFSConfigVolume(ctx, appName, config)
-	if err != nil || nfs == nil {
+	if err != nil {
 		return nil, err
 	}
-	return generateNFSConfigVolumePatch(appName, prNumber, namespace, h.previewDomain, nfs)
+	if nfs != nil {
+		patch, err := generateNFSConfigVolumePatch(appName, prNumber, namespace, h.previewDomain, nfs)
+		if err != nil {
+			return nil, err
+		}
+		patches = append(patches, *patch)
+	}
+	mounts, err := h.resolveNFSVolumes(ctx, appName, config)
+	if err != nil {
+		return nil, err
+	}
+	patch, err := generateNFSVolumesPatch(appName, mounts)
+	if err != nil {
+		return nil, err
+	}
+	if patch != nil {
+		patches = append(patches, *patch)
+	}
+	return patches, nil
 }
 
 // buildAllPatches combines all patch types for a preview Kustomization
-func buildAllPatches(appName, prNumber, namespace, previewDomain string, config *v1.PreviewConfig, callbackPath string, dbCreds *DBCredentials, nfsPatch *kustomize.Patch) []kustomize.Patch {
+func buildAllPatches(appName, prNumber, namespace, previewDomain string, config *v1.PreviewConfig, callbackPath string, dbCreds *DBCredentials, volumePatches []kustomize.Patch) []kustomize.Patch {
 	var allPatches []kustomize.Patch
 
 	// 1. Infrastructure strip patches (remove resources not needed in preview)
 	allPatches = append(allPatches, generateStripPatches()...)
+	allPatches = append(allPatches, generateNFSClaimStripPatches(config.Spec.NFSVolumes)...)
 
 	// 2. App-specific patches based on deployment type
 	switch config.Spec.DeploymentType {
@@ -464,9 +486,7 @@ func buildAllPatches(appName, prNumber, namespace, previewDomain string, config 
 			}
 		}
 
-		if nfsPatch != nil {
-			allPatches = append(allPatches, *nfsPatch)
-		}
+		allPatches = append(allPatches, volumePatches...)
 
 		if config.Spec.EnvMapping != nil {
 			h := &PreviewHandler{previewDomain: previewDomain}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
+	kustomize "github.com/fluxcd/pkg/apis/kustomize"
 	logr "github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -103,7 +104,7 @@ func renderPodSpec(t *testing.T, config *v1.PreviewConfig, nfs *nfsConfigVolume)
 	if err != nil {
 		t.Fatal(err)
 	}
-	patches := buildAllPatches("myapp", "7", "preview-pr-7", "example.test", config, "", nil, nfsPatch)
+	patches := buildAllPatches("myapp", "7", "preview-pr-7", "example.test", config, "", nil, []kustomize.Patch{*nfsPatch})
 	var kustomization struct {
 		Resources []string                 `json:"resources"`
 		Patches   []map[string]interface{} `json:"patches"`
