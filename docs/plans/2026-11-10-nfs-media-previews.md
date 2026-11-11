@@ -1,5 +1,5 @@
 ---
-status: done
+status: active
 branch: feat/nfs-volumes
 repos: [homelab-preview-operator, homelab]
 adrs: []
@@ -103,12 +103,15 @@ Phases 1–4 implemented on `feat/nfs-volumes` (relais run run-65fece1fa0d64-c34
 - input: fence tests → expected: exact spec + managed-by label before unsuspend; create failure and delete failure leave the Kustomization suspended; a tampered fence is restored; flag off removes only the labelled policy → actual: 7/7 pass.
 - input: envtest with cached k8s 1.34.1 assets → expected: CRD accepts the fields, rejects `nfsVolumes` with `deploymentType: helm` → actual: pass (TestEnvtest_NFSVolumesRule and the 7 existing cases).
 - input: spec without the new fields → expected: same config hash as before → actual: pass (TestSpecWithoutNFSOptionsHashesAsBefore).
-- input: before PR A, every preview Kustomization's inventory → expected: 0 PersistentVolume entries → actual: 0 preview namespaces existed (2026-11-10).
+- input: before PR A, `kubectl get kustomizations -A` filtered to `preview-pr-*` namespaces, their `.status.inventory.entries` → expected: 0 `_PersistentVolume` entries → actual: 0 preview Kustomizations existed (and 0 `preview-pr-*` namespaces), so 0 entries (2026-11-10; re-run right before merging PR A, same result).
 - input: after PR A → expected: CRD has `nfsVolumes`, operator pod 0.11.0, no rollback → actual: all three (helm history rev 21 0.11.0 deployed).
 - input: first live radarr preview (homelab#1144, 2026-11-10) → expected: fence blocks prod and internet → actual: FAILED — fence leaked through the CCNP `dns-visibility` allow-all; preview closed, 0 new torrents in prod qBittorrent; fixed by the egress-enforcement programme (homelab#1146, #1148).
-- input: radarr (#1144) and sonarr (#1149) previews with the fence enforced (2026-11-11) → expected: every live check → actual: pass — four mounts `ro, vers=4.1`, `touch` → EROFS; DNS instant; prod qBittorrent, prod app and internet time out; own Service 200; no allow-all egress in the endpoint's BPF map; PVs still Bound to prod with prod-only labels after teardown.
-- input: radarr preview held 17 min, `/proc/self/mountstats` → expected: NAS load within prod baseline + 10 Mb/s → actual: 29 NFS RPC ops, ~9.6 KB, no READDIR/READ (no rescan at start).
-- not yet observed: the first patch-agent promotion PR for radarr or sonarr with a preview verdict (comes with the next image pin finding).
+- input: radarr (#1144) and sonarr (#1149) previews with the fence enforced (2026-11-11) → observed: pod Ready; `kubectl get pvc` in the preview shows only the config PVCs (no `media`/`media2`); `preview-egress-fence` exists, created before the pod; `/media`, `/downloads`, `/media2`, `/downloads2` list the library (29, 79, 9, 0 entries) mounted `ro, vers=4.1`, `touch` → EROFS; DNS instant; prod qBittorrent, prod app and internet time out; the preview's own Service answers 200 from inside the pod; radarr's endpoint BPF map holds no allow-all egress; after teardown the PVs stay Bound to prod with prod-only Flux labels.
+- not observed: the preview URL served through the gateway (only the in-namespace Service was checked).
+- input: radarr preview held 17 min (2026-11-11 23:37–23:54 UTC), a proxy for NAS load: the pod's per-mount NFS counters in `/proc/self/mountstats` → actual: 29 NFS RPC ops in total, ~9.6 KB sent+received, no READDIR, no READ, data bytes 0 — radarr did not scan its library during the preview. Pass by proxy for that window.
+- not measured: node/NAS throughput against prod's baseline, the library file count, a scan duration (no scan happened), and any sonarr measurement; a preview that outlives radarr's scheduled refresh was not observed.
+- input: operator PR #41 → expected: checks green, read per check → actual: gosec, architecture decisions resolve, Generated files are up to date, Validate PR all SUCCESS on head fae00ce (License Check did not trigger).
+- not yet observed (next): the first patch-agent promotion PR for radarr or sonarr carrying a preview verdict, and patch-agent still refusing qbittorrent; the plan's rollback window (first 5 promotion PRs) runs from there. The plan stays `active` until those are seen.
 
 ## Decision log
 
