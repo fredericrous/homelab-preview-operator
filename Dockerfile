@@ -1,7 +1,8 @@
 # Build stage
-FROM golang:1.26.10-alpine AS builder
+FROM golang:1.26.11-alpine AS builder
 
 # Install build dependencies
+# hadolint ignore=DL3018
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /workspace
