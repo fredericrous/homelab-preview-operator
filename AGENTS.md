@@ -1,4 +1,4 @@
-<!-- amont:start -->
+<!-- greengate:start -->
 
 ## Git hooks (amont)
 
@@ -62,4 +62,4 @@ git config greengate.severity.<check-id> warn
 message it asks for, or change what it asks for — `amont setup`, or
 `greengate.commit.*` directly.
 
-<!-- amont:end -->
+<!-- greengate:end -->

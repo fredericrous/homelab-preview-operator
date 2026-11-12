@@ -1,4 +1,4 @@
-<!-- amont:start -->
+<!-- greengate:start -->
 
 ## Git hooks (amont)
 
@@ -8,4 +8,4 @@ and `git push` both need a long timeout — or a background run — are in
 [AGENTS.md](AGENTS.md) — read it before committing. Both files are
 generated: run `amont agents-md` after changing either.
 
-<!-- amont:end -->
+<!-- greengate:end -->
