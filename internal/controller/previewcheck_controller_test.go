@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -850,6 +851,9 @@ func TestReconcile_FailureSeenBeforeAnUnknownDeadlineIsFailed(t *testing.T) {
 		"another revision attempted": {func(ks *kustomizev1.Kustomization) {
 			ks.Status.LastAttemptedRevision = "main@sha1:0000000feed"
 		}, previewv1.PreviewCheckExpired},
+		"a re-created Kustomization": {func(ks *kustomizev1.Kustomization) {
+			ks.UID = types.UID("a-new-kustomization")
+		}, previewv1.PreviewCheckExpired},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -861,6 +865,16 @@ func TestReconcile_FailureSeenBeforeAnUnknownDeadlineIsFailed(t *testing.T) {
 			got := f.get().Status.LastKustomizationFailure
 			if got == nil || got.Generation != 7 || got.Reason != "HealthCheckFailed" || got.Revision != "main@sha1:abc123def456" {
 				t.Fatalf("recorded failure = %+v, want generation 7, HealthCheckFailed, the attempted revision", got)
+			}
+			// An unchanged failure records the same value on a later pass. A
+			// value that moved with the clock would make every status write a
+			// change for the API server, re-queueing the reconcile at once, off
+			// the requeue ladder. (The fake client bumps resourceVersion on
+			// every write, so the recorded value is what this can assert.)
+			f.clock.SetTime(f.clock.Now().Add(30 * time.Second))
+			f.reconcile()
+			if again := f.get().Status.LastKustomizationFailure; !apiequality.Semantic.DeepEqual(again, got) {
+				t.Errorf("a pass over an unchanged failure changed the record: %+v -> %+v", got, again)
 			}
 
 			// A retry starts: Ready goes Unknown at the current generation.

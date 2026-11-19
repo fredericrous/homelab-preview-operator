@@ -302,12 +302,14 @@ func (r *PreviewCheckReconciler) resolveNamespace(ctx context.Context, log logr.
 
 // checkGate holds everything until the preview Kustomization has settled.
 //
-// "Settled" means the Ready condition at the current generation (the
+// "Settled" means the Ready condition at the current generation: the
 // condition's own observedGeneration, not status.observedGeneration, which
-// lags a failing reconcile). It is deliberately stricter than "Ready": the operator's own
-// annotation machine suspends the Kustomization until credentials are patched
-// in, and a Ready=True carried over from the generation BEFORE that patch would
-// let checks run against a preview still pointing at nothing.
+// lags a failing reconcile.
+//
+// It is deliberately stricter than "Ready": the operator's own annotation
+// machine suspends the Kustomization until credentials are patched in, and a
+// Ready=True carried over from the generation BEFORE that patch would let
+// checks run against a preview still pointing at nothing.
 //
 // The gate closing mid-check (the operator re-suspends on a PreviewConfig hash
 // change) leaves in-flight checks Running rather than failing them — a
@@ -328,12 +330,12 @@ func (r *PreviewCheckReconciler) checkGate(ctx context.Context, log logr.Logger,
 	} else {
 		settled, reason, detail, readyFalse = kustomizationSettled(ks, spec.Revision)
 		if readyFalse {
-			pc.Status.LastKustomizationFailure = kustomizationFailure(ks, env.now)
+			pc.Status.LastKustomizationFailure = kustomizationFailure(ks)
 		} else if !settled && env.pastDeadline {
-			if f := latchedFailure(pc.Status.LastKustomizationFailure, ks, spec.Revision); f != nil {
+			if failure := latchedFailure(pc.Status.LastKustomizationFailure, ks, spec.Revision); failure != nil {
 				readyFalse = true
 				detail = fmt.Sprintf("preview Kustomization is not Ready: %s: %s (last seen %s; Ready is Unknown between retries)",
-					f.Reason, f.Message, f.ObservedAt.UTC().Format(time.RFC3339))
+					failure.Reason, failure.Message, failure.ObservedAt.UTC().Format(time.RFC3339))
 			}
 		}
 	}
@@ -423,20 +425,29 @@ func kustomizationSettled(ks *kustomizev1.Kustomization, revision string) (settl
 }
 
 // kustomizationFailure records a Ready=False that kustomizationSettled judged
-// to be the PR's own (current generation, the PR's revision).
-func kustomizationFailure(ks *kustomizev1.Kustomization, now time.Time) *previewv1.KustomizationFailure {
+// to be the PR's own (current generation, the PR's revision). Every field
+// comes from the Kustomization, ObservedAt from the condition's own transition
+// time, so an unchanged failure records the same value on every pass: a fresh
+// timestamp would make each status write a change, and each change would
+// re-queue the reconcile at once instead of on the requeue ladder.
+func kustomizationFailure(ks *kustomizev1.Kustomization) *previewv1.KustomizationFailure {
 	ready := apimeta.FindStatusCondition(ks.Status.Conditions, "Ready")
-	f := &previewv1.KustomizationFailure{
+	failure := &previewv1.KustomizationFailure{
 		UID:        string(ks.UID),
 		Generation: ks.Generation,
 		Revision:   ks.Status.LastAttemptedRevision,
-		ObservedAt: metav1.Time{Time: now},
 	}
 	if ready != nil {
-		f.Reason, f.Message = ready.Reason, truncateMessage(ready.Message, 4*1024)
+		failure.Reason, failure.Message = ready.Reason, truncateMessage(ready.Message, maxFailureMessageBytes)
+		failure.ObservedAt = ready.LastTransitionTime
 	}
-	return f
+	return failure
 }
+
+// maxFailureMessageBytes caps the Flux message kept in the recorded failure:
+// enough for a health-check timeout naming its workloads, small next to the
+// object's size limit.
+const maxFailureMessageBytes = 4 * 1024
 
 // latchedFailure returns the recorded failure when it still judges the PR:
 // Flux flips Ready to Unknown for the whole health-check wait of each retry
@@ -444,21 +455,21 @@ func kustomizationFailure(ks *kustomizev1.Kustomization, now time.Time) *preview
 // deadline that lands there would otherwise read as inconclusive. It counts
 // only while Ready is Unknown at the current generation and the failure names
 // the same Kustomization, generation and attempted revision.
-func latchedFailure(f *previewv1.KustomizationFailure, ks *kustomizev1.Kustomization, revision string) *previewv1.KustomizationFailure {
-	if f == nil {
+func latchedFailure(failure *previewv1.KustomizationFailure, ks *kustomizev1.Kustomization, revision string) *previewv1.KustomizationFailure {
+	if failure == nil {
 		return nil
 	}
 	ready := apimeta.FindStatusCondition(ks.Status.Conditions, "Ready")
 	if ready == nil || ready.Status != metav1.ConditionUnknown || ready.ObservedGeneration != ks.Generation {
 		return nil
 	}
-	if f.UID != string(ks.UID) || f.Generation != ks.Generation || f.Revision != ks.Status.LastAttemptedRevision {
+	if failure.UID != string(ks.UID) || failure.Generation != ks.Generation || failure.Revision != ks.Status.LastAttemptedRevision {
 		return nil
 	}
-	if revision != "" && !strings.HasSuffix(f.Revision, revision) {
+	if revision != "" && !strings.HasSuffix(failure.Revision, revision) {
 		return nil
 	}
-	return f
+	return failure
 }
 
 // runChecks advances exactly one check per reconcile, in a fixed order,
