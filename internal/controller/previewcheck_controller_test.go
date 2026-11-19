@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -800,6 +801,103 @@ func TestReconcile_ScanMissingAtDeadlineIsExpired(t *testing.T) {
 	}
 }
 
+// homelab #1186 and #1238: a crash-looping preview held Ready=False at the
+// current generation while status.observedGeneration lagged. At the deadline
+// that is a negative verdict on the PR's own revision, not an Expired one.
+func TestReconcile_HealthCheckFailedAtDeadlineIsFailed(t *testing.T) {
+	cases := map[string]struct {
+		attempted string
+		want      previewv1.PreviewCheckPhase
+	}{
+		"the PR's revision failed":  {"main@sha1:abc123def456", previewv1.PreviewCheckFailed},
+		"another revision failed":   {"main@sha1:0000000feed", previewv1.PreviewCheckExpired},
+		"no revision attempted yet": {"", previewv1.PreviewCheckExpired},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			check := newCheck(func(pc *previewv1.PreviewCheck) { pc.Spec.Revision = "sha1:abc123def456" })
+			ks := liveFailingShape(func(ks *kustomizev1.Kustomization) { ks.Status.LastAttemptedRevision = tc.attempted })
+			f := newFixture(t, check, newPreviewNamespace(), ks, newAppService(), newPreviewConfig(nil))
+
+			f.reconcileN(3)
+			if pc := f.get(); pc.Status.Phase.IsTerminal() {
+				t.Fatalf("phase = %s before the deadline, want a non-terminal phase", pc.Status.Phase)
+			}
+
+			f.clock.SetTime(f.clock.Now().Add(31 * time.Minute))
+			f.reconcile()
+			pc := f.get()
+			if pc.Status.Phase != tc.want {
+				t.Errorf("phase = %s, want %s (message %q)", pc.Status.Phase, tc.want, pc.Status.Message)
+			}
+		})
+	}
+}
+
+// Measured on homelab #1244: Flux holds Ready=Unknown/Progressing for the whole
+// health-check wait of each retry, so the deadline can land between failures.
+// The failure seen earlier still decides, but only while it names the same
+// Kustomization generation and revision.
+func TestReconcile_FailureSeenBeforeAnUnknownDeadlineIsFailed(t *testing.T) {
+	cases := map[string]struct {
+		mutate func(ks *kustomizev1.Kustomization)
+		want   previewv1.PreviewCheckPhase
+	}{
+		"same generation and revision": {func(*kustomizev1.Kustomization) {}, previewv1.PreviewCheckFailed},
+		"the generation moved on": {func(ks *kustomizev1.Kustomization) {
+			ks.Generation = 8
+			ks.Status.Conditions[0].ObservedGeneration = 8
+		}, previewv1.PreviewCheckExpired},
+		"another revision attempted": {func(ks *kustomizev1.Kustomization) {
+			ks.Status.LastAttemptedRevision = "main@sha1:0000000feed"
+		}, previewv1.PreviewCheckExpired},
+		"a re-created Kustomization": {func(ks *kustomizev1.Kustomization) {
+			ks.UID = types.UID("a-new-kustomization")
+		}, previewv1.PreviewCheckExpired},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			check := newCheck(func(pc *previewv1.PreviewCheck) { pc.Spec.Revision = "sha1:abc123def456" })
+			f := newFixture(t, check, newPreviewNamespace(), liveFailingShape(), newAppService(), newPreviewConfig(nil))
+			f.reconcileN(3)
+
+			// The failure is recorded in the status, and it reads back.
+			got := f.get().Status.LastKustomizationFailure
+			if got == nil || got.Generation != 7 || got.Reason != "HealthCheckFailed" || got.Revision != "main@sha1:abc123def456" {
+				t.Fatalf("recorded failure = %+v, want generation 7, HealthCheckFailed, the attempted revision", got)
+			}
+			// An unchanged failure records the same value on a later pass. A
+			// value that moved with the clock would make every status write a
+			// change for the API server, re-queueing the reconcile at once, off
+			// the requeue ladder. (The fake client bumps resourceVersion on
+			// every write, so the recorded value is what this can assert.)
+			f.clock.SetTime(f.clock.Now().Add(30 * time.Second))
+			f.reconcile()
+			if again := f.get().Status.LastKustomizationFailure; !apiequality.Semantic.DeepEqual(again, got) {
+				t.Errorf("a pass over an unchanged failure changed the record: %+v -> %+v", got, again)
+			}
+
+			// A retry starts: Ready goes Unknown at the current generation.
+			ks := &kustomizev1.Kustomization{}
+			if err := f.cl.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: "preview-app-42"}, ks); err != nil {
+				t.Fatal(err)
+			}
+			ks.Status.Conditions[0].Status = metav1.ConditionUnknown
+			ks.Status.Conditions[0].Reason = "Progressing"
+			tc.mutate(ks)
+			if err := f.cl.Update(context.Background(), ks); err != nil {
+				t.Fatal(err)
+			}
+
+			f.clock.SetTime(f.clock.Now().Add(31 * time.Minute))
+			f.reconcile()
+			if pc := f.get(); pc.Status.Phase != tc.want {
+				t.Errorf("phase = %s, want %s (message %q)", pc.Status.Phase, tc.want, pc.Status.Message)
+			}
+		})
+	}
+}
+
 func TestReconcile_EmptyCVESetPassesWithoutCallingTheEnricher(t *testing.T) {
 	objects := happyObjects()
 	// Only non-CVE ids: posting an empty list would earn a 400 the ladder
@@ -1296,6 +1394,65 @@ func TestKustomizationSettled(t *testing.T) {
 	settled, _, _, readyFalse := kustomizationSettled(failing, "")
 	if settled || !readyFalse {
 		t.Errorf("Ready=False must gate AND be reported as a real negative verdict: %v/%v", settled, readyFalse)
+	}
+}
+
+// The live shape of homelab #1238's preview: Flux left status.observedGeneration
+// at the last good reconcile (3) while the Ready condition judged generation 7.
+func liveFailingShape(mutate ...func(*kustomizev1.Kustomization)) *kustomizev1.Kustomization {
+	return newSettledKustomization(append([]func(*kustomizev1.Kustomization){func(ks *kustomizev1.Kustomization) {
+		ks.Generation = 7
+		ks.Status.ObservedGeneration = 3
+		ks.Status.LastAttemptedRevision = "main@sha1:abc123def456"
+		ks.Status.Conditions = []metav1.Condition{{
+			Type: "Ready", Status: metav1.ConditionFalse, Reason: "HealthCheckFailed",
+			Message:            "health check failed after 5m0s: timeout waiting for: [Deployment/preview-pr-1238/kavita status: 'InProgress']",
+			ObservedGeneration: 7, LastTransitionTime: metav1.Now(),
+		}}
+	}}, mutate...)...)
+}
+
+func TestKustomizationSettled_ReadyConditionGeneration(t *testing.T) {
+	settled, _, detail, readyFalse := kustomizationSettled(liveFailingShape(), "sha1:abc123def456")
+	if settled || !readyFalse {
+		t.Errorf("a health check failing at the current generation must be a negative verdict even with status.observedGeneration lagging: %v/%v (%s)", settled, readyFalse, detail)
+	}
+
+	// Applied, with the status lagging: the condition decides.
+	applied := newSettledKustomization(func(ks *kustomizev1.Kustomization) {
+		ks.Generation = 4
+		ks.Status.Conditions[0].ObservedGeneration = 4
+	})
+	if settled, _, detail, _ := kustomizationSettled(applied, ""); !settled {
+		t.Errorf("Ready=True at the current generation must pass with status.observedGeneration lagging: %s", detail)
+	}
+
+	// A condition without a generation falls back to status.observedGeneration.
+	noGen := newSettledKustomization(func(ks *kustomizev1.Kustomization) {
+		ks.Generation = 4
+		ks.Status.Conditions[0].ObservedGeneration = 0
+	})
+	if settled, _, _, _ := kustomizationSettled(noGen, ""); settled {
+		t.Error("a Ready condition with no generation must fall back to status.observedGeneration")
+	}
+
+	// Not the PR's fault: inconclusive, and the message says so.
+	for _, reason := range []string{"DependencyNotReady", "ArtifactFailed"} {
+		ks := liveFailingShape(func(ks *kustomizev1.Kustomization) { ks.Status.Conditions[0].Reason = reason })
+		settled, _, detail, readyFalse := kustomizationSettled(ks, "")
+		if settled || readyFalse || !strings.Contains(detail, "inconclusive, not the PR's fault") {
+			t.Errorf("%s must stay inconclusive: %v/%v %q", reason, settled, readyFalse, detail)
+		}
+	}
+
+	// The generation names the spec, not the commit: a failure of another
+	// revision does not judge this PR.
+	for name, attempted := range map[string]string{"other commit": "main@sha1:0000000feed", "none yet": ""} {
+		ks := liveFailingShape(func(ks *kustomizev1.Kustomization) { ks.Status.LastAttemptedRevision = attempted })
+		settled, reason, detail, readyFalse := kustomizationSettled(ks, "sha1:abc123def456")
+		if settled || readyFalse || reason != previewv1.ReasonKustomizationNotReady || !strings.Contains(detail, "(inconclusive)") {
+			t.Errorf("%s: a failure of a revision that is not the PR's must stay inconclusive: %v/%v %s %q", name, settled, readyFalse, reason, detail)
+		}
 	}
 }
 

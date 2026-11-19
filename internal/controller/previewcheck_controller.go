@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
+	"github.com/fluxcd/pkg/apis/meta"
 
 	previewv1 "github.com/fredericrous/homelab-preview-operator/api/v1"
 	"github.com/fredericrous/homelab-preview-operator/internal/enrichment"
@@ -301,10 +302,14 @@ func (r *PreviewCheckReconciler) resolveNamespace(ctx context.Context, log logr.
 
 // checkGate holds everything until the preview Kustomization has settled.
 //
-// "Settled" is deliberately stricter than "Ready": the operator's own
-// annotation machine suspends the Kustomization until credentials are patched
-// in, and a Ready=True carried over from the generation BEFORE that patch would
-// let checks run against a preview still pointing at nothing.
+// "Settled" means the Ready condition at the current generation: the
+// condition's own observedGeneration, not status.observedGeneration, which
+// lags a failing reconcile.
+//
+// It is deliberately stricter than "Ready": the operator's own annotation
+// machine suspends the Kustomization until credentials are patched in, and a
+// Ready=True carried over from the generation BEFORE that patch would let
+// checks run against a preview still pointing at nothing.
 //
 // The gate closing mid-check (the operator re-suspends on a PreviewConfig hash
 // change) leaves in-flight checks Running rather than failing them — a
@@ -324,6 +329,15 @@ func (r *PreviewCheckReconciler) checkGate(ctx context.Context, log logr.Logger,
 		reason, detail = previewv1.ReasonKustomizationNotReady, fmt.Sprintf("Kustomization %s/%s not found", env.nsName, ksName)
 	} else {
 		settled, reason, detail, readyFalse = kustomizationSettled(ks, spec.Revision)
+		if readyFalse {
+			pc.Status.LastKustomizationFailure = kustomizationFailure(ks)
+		} else if !settled && env.pastDeadline {
+			if failure := latchedFailure(pc.Status.LastKustomizationFailure, ks, spec.Revision); failure != nil {
+				readyFalse = true
+				detail = fmt.Sprintf("preview Kustomization is not Ready: %s: %s (last seen %s; Ready is Unknown between retries)",
+					failure.Reason, failure.Message, failure.ObservedAt.UTC().Format(time.RFC3339))
+			}
+		}
 	}
 	if settled {
 		return ctrl.Result{}, false, nil
@@ -365,21 +379,40 @@ func kustomizationSettled(ks *kustomizev1.Kustomization, revision string) (settl
 	if ks.Annotations[CredentialsPatchedAnnotation] != "true" {
 		return false, previewv1.ReasonKustomizationNotReady, "preview credentials have not been patched in yet", false
 	}
-	if ks.Generation != ks.Status.ObservedGeneration {
-		return false, previewv1.ReasonKustomizationNotReady,
-			fmt.Sprintf("preview Kustomization generation %d not observed (at %d)", ks.Generation, ks.Status.ObservedGeneration), false
-	}
-
 	ready := apimeta.FindStatusCondition(ks.Status.Conditions, "Ready")
-	switch {
-	case ready == nil:
+	if ready == nil {
 		return false, previewv1.ReasonKustomizationNotReady, "preview Kustomization has no Ready condition yet", false
-	case ready.ObservedGeneration != 0 && ready.ObservedGeneration != ks.Generation:
+	}
+	// The Ready condition carries the generation it judged. status.observedGeneration
+	// does not do for this: Flux advances it only after a SUCCESSFUL reconcile,
+	// so a preview that keeps failing its health check reads "not observed"
+	// forever and could never be judged (homelab #1186, #1238). The status
+	// field is only the fallback for a condition without a generation.
+	if ready.ObservedGeneration == 0 {
+		if ks.Generation != ks.Status.ObservedGeneration {
+			return false, previewv1.ReasonKustomizationNotReady,
+				fmt.Sprintf("preview Kustomization generation %d not observed (at %d)", ks.Generation, ks.Status.ObservedGeneration), false
+		}
+	} else if ready.ObservedGeneration != ks.Generation {
 		return false, previewv1.ReasonKustomizationNotReady,
 			fmt.Sprintf("preview Kustomization Ready condition is stale (observed %d, want %d)", ready.ObservedGeneration, ks.Generation), false
+	}
+
+	switch {
 	case ready.Status == metav1.ConditionFalse:
-		return false, previewv1.ReasonKustomizationNotReady,
-			fmt.Sprintf("preview Kustomization is not Ready: %s: %s", ready.Reason, ready.Message), true
+		detail := fmt.Sprintf("preview Kustomization is not Ready: %s: %s", ready.Reason, ready.Message)
+		// A failed verdict closes the PR. A source or dependency that is not
+		// there is not the PR's fault: inconclusive.
+		if ready.Reason == meta.DependencyNotReadyReason || ready.Reason == meta.ArtifactFailedReason {
+			return false, previewv1.ReasonKustomizationNotReady, detail + " (inconclusive, not the PR's fault)", false
+		}
+		// The generation names the spec, not the commit: a failure judges the
+		// PR only when Flux attempted the PR's own revision.
+		if revision != "" && !strings.HasSuffix(ks.Status.LastAttemptedRevision, revision) {
+			return false, previewv1.ReasonKustomizationNotReady,
+				fmt.Sprintf("%s; it attempted %q, not the requested revision %q (inconclusive)", detail, ks.Status.LastAttemptedRevision, revision), false
+		}
+		return false, previewv1.ReasonKustomizationNotReady, detail, true
 	case ready.Status != metav1.ConditionTrue:
 		return false, previewv1.ReasonKustomizationNotReady, "preview Kustomization readiness is unknown", false
 	}
@@ -389,6 +422,54 @@ func kustomizationSettled(ks *kustomizev1.Kustomization, revision string) (settl
 			fmt.Sprintf("preview applied %q, which does not end with the requested revision %q", ks.Status.LastAppliedRevision, revision), false
 	}
 	return true, "", fmt.Sprintf("preview Kustomization applied %s", ks.Status.LastAppliedRevision), false
+}
+
+// kustomizationFailure records a Ready=False that kustomizationSettled judged
+// to be the PR's own (current generation, the PR's revision). Every field
+// comes from the Kustomization, ObservedAt from the condition's own transition
+// time, so an unchanged failure records the same value on every pass: a fresh
+// timestamp would make each status write a change, and each change would
+// re-queue the reconcile at once instead of on the requeue ladder.
+func kustomizationFailure(ks *kustomizev1.Kustomization) *previewv1.KustomizationFailure {
+	ready := apimeta.FindStatusCondition(ks.Status.Conditions, "Ready")
+	failure := &previewv1.KustomizationFailure{
+		UID:        string(ks.UID),
+		Generation: ks.Generation,
+		Revision:   ks.Status.LastAttemptedRevision,
+	}
+	if ready != nil {
+		failure.Reason, failure.Message = ready.Reason, truncateMessage(ready.Message, maxFailureMessageBytes)
+		failure.ObservedAt = ready.LastTransitionTime
+	}
+	return failure
+}
+
+// maxFailureMessageBytes caps the Flux message kept in the recorded failure:
+// enough for a health-check timeout naming its workloads, small next to the
+// object's size limit.
+const maxFailureMessageBytes = 4 * 1024
+
+// latchedFailure returns the recorded failure when it still judges the PR:
+// Flux flips Ready to Unknown for the whole health-check wait of each retry
+// (measured on homelab #1244: Unknown for 10 of every ~11 minutes), so a
+// deadline that lands there would otherwise read as inconclusive. It counts
+// only while Ready is Unknown at the current generation and the failure names
+// the same Kustomization, generation and attempted revision.
+func latchedFailure(failure *previewv1.KustomizationFailure, ks *kustomizev1.Kustomization, revision string) *previewv1.KustomizationFailure {
+	if failure == nil {
+		return nil
+	}
+	ready := apimeta.FindStatusCondition(ks.Status.Conditions, "Ready")
+	if ready == nil || ready.Status != metav1.ConditionUnknown || ready.ObservedGeneration != ks.Generation {
+		return nil
+	}
+	if failure.UID != string(ks.UID) || failure.Generation != ks.Generation || failure.Revision != ks.Status.LastAttemptedRevision {
+		return nil
+	}
+	if revision != "" && !strings.HasSuffix(failure.Revision, revision) {
+		return nil
+	}
+	return failure
 }
 
 // runChecks advances exactly one check per reconcile, in a fixed order,

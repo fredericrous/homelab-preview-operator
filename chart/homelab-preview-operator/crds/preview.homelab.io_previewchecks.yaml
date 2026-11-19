@@ -366,6 +366,42 @@ spec:
                 description: ExpiresAt is startedAt + ttlSeconds.
                 format: date-time
                 type: string
+              lastKustomizationFailure:
+                description: |-
+                  LastKustomizationFailure is the last Ready=False the preview
+                  Kustomization reported for the revision under test. Flux sets Ready to
+                  Unknown for the whole health-check wait of every retry, so the deadline
+                  can fall between two failures; the gate reads this instead, while it
+                  still names the same Kustomization, generation and revision.
+                properties:
+                  generation:
+                    description: Generation the Ready condition judged.
+                    format: int64
+                    type: integer
+                  message:
+                    type: string
+                  observedAt:
+                    description: ObservedAt is when the operator saw it.
+                    format: date-time
+                    type: string
+                  reason:
+                    description: Reason and Message are the Ready condition's.
+                    type: string
+                  revision:
+                    description: Revision is the Kustomization's lastAttemptedRevision
+                      at the failure.
+                    type: string
+                  uid:
+                    description: 'UID of the Kustomization that failed: a re-created
+                      one does not inherit it.'
+                    type: string
+                required:
+                - generation
+                - observedAt
+                - reason
+                - revision
+                - uid
+                type: object
               message:
                 description: Message is the latest human-readable detail.
                 type: string
