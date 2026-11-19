@@ -392,6 +392,14 @@ type PreviewCheckStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// LastKustomizationFailure is the last Ready=False the preview
+	// Kustomization reported for the revision under test. Flux sets Ready to
+	// Unknown for the whole health-check wait of every retry, so the deadline
+	// can fall between two failures; the gate reads this instead, while it
+	// still names the same Kustomization, generation and revision.
+	// +optional
+	LastKustomizationFailure *KustomizationFailure `json:"lastKustomizationFailure,omitempty"`
+
 	// Conditions carries the single "Succeeded" condition.
 	// +optional
 	// +patchMergeKey=type
@@ -399,6 +407,22 @@ type PreviewCheckStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+}
+
+// KustomizationFailure identifies one Ready=False of the preview Kustomization.
+type KustomizationFailure struct {
+	// UID of the Kustomization that failed: a re-created one does not inherit it.
+	UID string `json:"uid"`
+	// Generation the Ready condition judged.
+	Generation int64 `json:"generation"`
+	// Revision is the Kustomization's lastAttemptedRevision at the failure.
+	Revision string `json:"revision"`
+	// Reason and Message are the Ready condition's.
+	Reason string `json:"reason"`
+	// +optional
+	Message string `json:"message,omitempty"`
+	// ObservedAt is when the operator saw it.
+	ObservedAt metav1.Time `json:"observedAt"`
 }
 
 // PreviewCheckResult is one check's outcome.
