@@ -18,3 +18,11 @@ Part of [t28: a lane bump whose preview crash-loops is failed, closed and held b
   - `TestKustomizationSettled*`, `TestReconcile_HealthCheckFailedAtDeadlineIsFailed`, `TestReconcile_FailureSeenBeforeAnUnknownDeadlineIsFailed` → pass → pass.
   - The same tests against main's controller → fail → 3 FAIL.
   - The latch test with the latch removed → fails → the "same generation and revision" case FAILs.
+
+## Implementation review
+
+Phase 1, 2 rounds. Next: release v0.11.1, then sre-agent Phase 2.
+
+- implementation-review: approve (round 1 approve-with-changes 79k/83 s; delta 32k/23 s). Fixed: `f` renamed `failure` (blocking), a named message cap, the comment reflowed. Deliberate: the `f := newFixture` repo convention.
+- backend: approve-with-changes (73k/58 s, delta 26k/12 s). Fixed: `ObservedAt` from the condition's transition time, so the status no longer churns (high); a re-created-UID case. Deliberate: "last seen" wording (follow-up filed).
+- lang:go: approve-with-changes (66k/33 s, delta 28k/22 s). Deliberate: `HasSuffix`, which mirrors the applied-revision check; `truncateMessage`, the existing helper; `ObservedAt` doc wording (follow-up filed).
