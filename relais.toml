@@ -33,7 +33,7 @@ max_agents_total = 24
 # never counted as passed checks. `off` is not checked at all, and
 # `relais doctor` says which of the three each one is.
 [integrations]
-aval = "required"
+greentopo = "required"
 amont = "required"
 amont_agent = "required"
 
@@ -81,7 +81,7 @@ timeout_seconds = 900
 # minimum_tier = "escalation"
 # review = "required"
 
-# Path-to-aval-key mappings. aval resolves exact keys; it has no
+# Path-to-greentopo-key mappings. greentopo resolves exact keys; it has no
 # source-impact analysis, so the mapping lives here (SPEC §7).
 # [[architecture.mapping]]
 # paths = ["crates/**"]

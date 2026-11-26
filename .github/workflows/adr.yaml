@@ -1,7 +1,7 @@
 name: ADR
 
 # A separate workflow rather than a job in ci.yaml, deliberately. This job's
-# `AVAL_VERSION` changes on every aval release, and the main CI has suites of
+# `GREENTOPO_VERSION` changes on every greentopo release, and the main CI has suites of
 # its own to pay for. Keeping the ADR check apart means a pin bump costs
 # seconds and queues nothing else.
 on:
@@ -26,12 +26,12 @@ jobs:
 
       # The local gate reports a GAP rather than blocking when the binary is
       # absent, which is correct — a command that never ran has judged nothing.
-      # That is why this job is not redundant: a contributor without `aval`
+      # That is why this job is not redundant: a contributor without `greentopo`
       # installed is waved through locally and must still be unable to merge a
       # corpus that no longer resolves.
-      - name: Ensure aval
+      - name: Ensure greentopo
         env:
-          AVAL_VERSION: 1.12.0
+          GREENTOPO_VERSION: 2.0.0
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -40,42 +40,42 @@ jobs:
           # ignored until the image rebuilt — which is how a 0.3.1 pin once ran
           # 0.2.0 and reported the projection stale.
           have=""
-          if command -v aval > /dev/null 2>&1; then
-            have="$(aval --version 2>/dev/null | awk '{print $2}')"
+          if command -v greentopo > /dev/null 2>&1; then
+            have="$(greentopo --version 2>/dev/null | awk '{print $2}')"
           fi
-          if [ "$have" = "$AVAL_VERSION" ]; then
-            aval --version
+          if [ "$have" = "$GREENTOPO_VERSION" ]; then
+            greentopo --version
             exit 0
           fi
-          echo "::warning::runner carries aval ${have:-none}, this repository pins ${AVAL_VERSION} — downloading it"
+          echo "::warning::runner carries greentopo ${have:-none}, this repository pins ${GREENTOPO_VERSION} — downloading it"
           mkdir -p "$RUNNER_TEMP/bin"
           # Through the API (`gh release download`), not the public download URL:
           # that route throttles anonymous downloads, and it returned 504 for hours
           # on 2026-11-08 while the API served the same files.
-          asset="aval-${AVAL_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          asset="greentopo-${GREENTOPO_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
           for attempt in 1 2 3; do
             rc=0
-            timeout 120 gh release download "v${AVAL_VERSION}" --repo fredericrous/aval \
+            timeout 120 gh release download "v${GREENTOPO_VERSION}" --repo greenharness/greentopo \
               --pattern "$asset" -O "$RUNNER_TEMP/$asset" --clobber || rc=$?
             [ "$rc" = 0 ] && break
             if [ "$attempt" = 3 ]; then
-              echo "::error::could not download $asset from fredericrous/aval v${AVAL_VERSION} (exit $rc; 124 = timed out after 120 s)"
+              echo "::error::could not download $asset from greenharness/greentopo v${GREENTOPO_VERSION} (exit $rc; 124 = timed out after 120 s)"
               exit 1
             fi
             sleep $((attempt * 5))
           done
           tar xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/bin" --strip-components=1 \
-            "aval-${AVAL_VERSION}-x86_64-unknown-linux-gnu/aval"
-          chmod +x "$RUNNER_TEMP/bin/aval"
+            "greentopo-${GREENTOPO_VERSION}-x86_64-unknown-linux-gnu/greentopo"
+          chmod +x "$RUNNER_TEMP/bin/greentopo"
           # GITHUB_PATH applies to LATER steps only.
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/bin/aval" --version
+          "$RUNNER_TEMP/bin/greentopo" --version
 
       # This repository keeps no records of its own: every decision it answers
       # from is vendored. What this proves is that the vendored pack still
       # parses and that nothing here contradicts it.
-      - name: aval check
-        run: aval check
+      - name: greentopo check
+        run: greentopo check
 
       # The areas above are a reviewed declaration of which parts of this
       # repository are a command line or a UI; they decide which fleet rules
@@ -83,9 +83,9 @@ jobs:
       # (exit 1) or could not be inspected (exit 3). Detection is advisory: a
       # false positive belongs under `disclaims:` in .adr.yaml.
       - name: The declared areas still describe the repository
-        run: aval traits --check
+        run: greentopo traits --check
 
-      # A stale `.claude/hooks/aval-heads.sh` injects last release's preamble
+      # A stale `.claude/hooks/greentopo-heads.sh` injects last release's preamble
       # into every session and nothing else would say so.
       - name: The session hook is wired and current
-        run: aval hook install --check
+        run: greentopo hook install --check

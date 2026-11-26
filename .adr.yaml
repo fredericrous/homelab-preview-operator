@@ -5,8 +5,8 @@
 # repository and vendored below. A record here deciding one of their slots
 # would be a contradiction, not an override.
 #
-# `aval add github:fredericrous/decisions` refreshes the pack; nothing tells
-# this repository when a fleet decision changes, so `aval add --check` asks.
+# `greentopo add github:fredericrous/decisions` refreshes the pack; nothing tells
+# this repository when a fleet decision changes, so `greentopo add --check` asks.
 
 packs:
   - .adr/packs/decisions.pack
@@ -22,7 +22,7 @@ keys:
 areas:
   "**": []
 
-# `aval traits --detect` reads the `package main` below as a command line.
+# `greentopo traits --detect` reads the `package main` below as a command line.
 # It is not one: a Kubernetes controller is configured by its Deployment
 # manifest and run by the kubelet; no person or script types its flags, reads
 # its output or branches on its exit code, which is what the command-line rules

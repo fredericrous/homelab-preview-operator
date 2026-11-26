@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "sh .claude/hooks/aval-heads.sh",
+            "command": "sh .claude/hooks/greentopo-heads.sh",
             "type": "command"
           }
         ]
