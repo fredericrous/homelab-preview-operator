@@ -20,7 +20,7 @@ jobs:
       # platform: any — this suite ships as a single-target Linux image and
       # its Go tests do not depend on where they ran, so a macOS laptop's
       # attestation covers this Linux runner. Repos that ship per-platform
-      # binaries (amont, amont-agent, aval, relais) keep the strict default.
+      # binaries (amont, amont-agent, greentopo, relais) keep the strict default.
       - name: Attestation check
         id: attest
         uses: greenharness/greensummit@v2
