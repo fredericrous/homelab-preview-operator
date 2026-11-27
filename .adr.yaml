@@ -17,7 +17,7 @@ packs:
 scopes: []
 keys:
 
-# Which parts of this repository have which traits (aval 1.7, SEMANTICS
+# Which parts of this repository have which traits (greentopo, SEMANTICS
 # section 2.5). None: no rule about a command line or a UI is listed here.
 areas:
   "**": []
