@@ -31,7 +31,7 @@ jobs:
       # corpus that no longer resolves.
       - name: Ensure greentopo
         env:
-          GREENTOPO_VERSION: 2.0.0
+          GREENTOPO_VERSION: 3.0.0
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
