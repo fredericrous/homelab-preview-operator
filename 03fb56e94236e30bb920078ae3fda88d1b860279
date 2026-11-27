@@ -1,0 +1,16 @@
+greengate-provenance-v1
+commit 03fb56e94236e30bb920078ae3fda88d1b860279
+tree 9b5e9754920b9b017341b1692bbc63dafb1671e7
+canon 9fa7664cbf1bf808302f0c3f0f44138bebbdeb53
+patch 6e93854da120e0eb9f83ca98da0c9cdf4c3b76a5
+plan docs/plans/2026-11-27-topo3-github-repos.md e8cd502be5f00861bcc465d8c3cce5adf763a8848dc300093ac35f39b0ec4c2f
+review reviewed dd39fe72b3fb2f1b89b30e93210feaab0f481972fc23e84074674140a27b12d7
+preview not-required
+producer greenbelay 6.18.2
+
+-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg7UOvJ8myo4dhW907VFty7T/bUV
+RFQerK+MWJ4bjChwcAAAAUZ3JlZW5nYXRlLXByb3ZlbmFuY2UAAAAAAAAABnNoYTUxMgAA
+AFMAAAALc3NoLWVkMjU1MTkAAABAJIuB7bCYAAw7KZVTvLbhDFFU/XS81GXDq5bHg9aRJ5
+uJy3k2cqfq5rmi3VwtIfqp0+EHfWrrT7vUfOM+Ld/sDQ==
+-----END SSH SIGNATURE-----
