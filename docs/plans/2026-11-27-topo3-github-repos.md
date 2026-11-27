@@ -1,7 +1,7 @@
 ---
 canonical: decisions:docs/plans/2026-11-27-topo3-github-repos.md
 phases: [6]
-status: active
+status: done
 branch: chore/t25-topo3
 repos: [homelab-preview-operator]
 ---
@@ -14,3 +14,6 @@ script.
 
 ## Code review
 - homelab-preview-operator: none — CI pin, re-vendored pack, regenerated hook and gate block, one comment, no code
+
+## Implementation review
+- implementation-review (opus): approve (48k, 36 s): low, tick Phase 6 at close.
